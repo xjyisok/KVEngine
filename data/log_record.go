@@ -8,8 +8,9 @@ import (
 type LogRecordType = byte
 
 const (
-	LogRecordTypeNormal LogRecordType = 0 //正常数据
-	LogRecordTypeDelete LogRecordType = 1 //删除标记
+	LogRecordTypeNormal   LogRecordType = 0 //正常数据
+	LogRecordTypeDelete   LogRecordType = 1 //删除标记
+	LogRecordTypeBatchEnd LogRecordType = 2 //批量写入标记
 )
 
 // const DataFileNameSuffix = ".data"
@@ -33,6 +34,12 @@ type LogRecord struct {
 	Key   []byte
 	Value []byte
 	Type  LogRecordType //记录类型，正常数据还是删除标记
+}
+
+// 【新增】事务记录结构体
+type TransactionRecord struct {
+	Record *LogRecord
+	Pos    *LogRecordPos
 }
 
 func EncodeLogRecord(logRecord *LogRecord) ([]byte, int64) {

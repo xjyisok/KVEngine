@@ -4,6 +4,7 @@ import (
 	"bitcask-go/data"
 	"bitcask-go/index"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"sort"
@@ -20,6 +21,7 @@ type DB struct {
 	options        Options
 	indexer        index.Indexer //内存索引
 	fileIds        []int         // 文件 id，只能在加载索引的时候使用，不能在其他的地方更新和使用
+	seqNum         uint64        //全局事务序列号
 }
 
 // Close 关闭数据库
@@ -95,14 +97,14 @@ func (db *DB) Delete(key []byte) error {
 	}
 	//构造logRecord结构体
 	record := &data.LogRecord{
-		Key:   key,
+		Key:   logRecordKeyWithSeq(nonTransaction, key),
 		Value: nil,
 		Type:  data.LogRecordTypeDelete, //删除标记
 	}
 	if pos, _ := db.indexer.Get(key); pos == nil {
 		return nil
 	}
-	_, err := db.appnedLogRecord(record)
+	_, err := db.appnedLogRecordWithLock(record)
 	if err != nil {
 		return err
 	}
@@ -120,11 +122,11 @@ func (db *DB) Put(key []byte, value []byte) error {
 	}
 	//构造logRecord结构体
 	record := &data.LogRecord{
-		Key:   key,
+		Key:   logRecordKeyWithSeq(nonTransaction, key),
 		Value: value,
 		Type:  data.LogRecordTypeNormal, //正常数据
 	}
-	LogRecordPos, err := db.appnedLogRecord(record)
+	LogRecordPos, err := db.appnedLogRecordWithLock(record)
 	if err != nil {
 		return err
 	}
@@ -223,9 +225,14 @@ func (db *DB) getValueByPosition(logRecordPos *data.LogRecordPos) ([]byte, error
 
 	return logRecord.Value, nil
 }
-func (db *DB) appnedLogRecord(record *data.LogRecord) (*data.LogRecordPos, error) {
+func (db *DB) appnedLogRecordWithLock(record *data.LogRecord) (*data.LogRecordPos, error) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
+	return db.appnedLogRecord(record)
+}
+func (db *DB) appnedLogRecord(record *data.LogRecord) (*data.LogRecordPos, error) {
+	// db.mu.Lock()
+	// defer db.mu.Unlock()
 	//数据库在没有文件写入时是没有活跃文件的，所以需要初始化文件id
 	//如果当前的活跃文件为空则初始化活跃文件
 	if db.activeDataFile == nil {
@@ -335,7 +342,27 @@ func (db *DB) loadIndexFromDataFiles() error {
 	if len(db.fileIds) == 0 {
 		return nil
 	}
-
+	updateIndex := func(key []byte, Type data.LogRecordType, logRecordPos *data.LogRecordPos) error {
+		var ok bool
+		if Type == data.LogRecordTypeDelete {
+			//NOTE这里由于bitcask是追加写入所以删除操作只是添加了一个删除标记，并没有真正删除数据文件中的数据
+			//所以在加载索引时需要将该key从内存索引中删除
+			//比如用户先执行了put(k1,v1)然后delete(k1)最后再put(k1,v2)
+			//那么数据文件中会有三条记录，k1:v1、k1:delete标记、k1:v2
+			//在加载索引时会先将k1指向v1的位置，然后再将k1从内存索引中删除，最后再将k1指向v2的位置
+			//这样就保证了内存索引中的数据是最新的
+			ok = db.indexer.Delete(key)
+		} else if Type == data.LogRecordTypeNormal {
+			ok = db.indexer.Put(key, logRecordPos)
+		}
+		if !ok {
+			return ErrIndexUpdateFailed
+		}
+		return nil
+	}
+	//暂存批量写入的记录
+	batchRecords := make(map[uint64][]*data.TransactionRecord)
+	curSeqNum := nonTransaction
 	// 遍历所有的文件id，处理文件中的记录
 	for i, fid := range db.fileIds {
 		var fileId = uint32(fid)
@@ -359,34 +386,42 @@ func (db *DB) loadIndexFromDataFiles() error {
 			//fmt.Printf("type:%d,keySize:%d,valueSize:%d\n", logRecord.Type, len(logRecord.Key), len(logRecord.Value))
 			// 构造内存索引并保存
 			logRecordPos := &data.LogRecordPos{Fid: fileId, Offset: offset}
-			var ok bool
-			if logRecord.Type == data.LogRecordTypeDelete {
-				//NOTE这里由于bitcask是追加写入所以删除操作只是添加了一个删除标记，并没有真正删除数据文件中的数据
-				//所以在加载索引时需要将该key从内存索引中删除
-				//比如用户先执行了put(k1,v1)然后delete(k1)最后再put(k1,v2)
-				//那么数据文件中会有三条记录，k1:v1、k1:delete标记、k1:v2
-				//在加载索引时会先将k1指向v1的位置，然后再将k1从内存索引中删除，最后再将k1指向v2的位置
-				//这样就保证了内存索引中的数据是最新的
-				ok = db.indexer.Delete(logRecord.Key)
+			realKey, seqNum := parseLogRecordKey(logRecord.Key)
+			fmt.Printf("type:%d,key:%s,seqNum:%d\n", logRecord.Type, string(realKey), seqNum)
+			if seqNum == nonTransaction {
+				//非批量写数据索引构建
+				updateIndex(realKey, logRecord.Type, logRecordPos)
 			} else {
-				ok = db.indexer.Put(logRecord.Key, logRecordPos)
+				//批量写数据索引构建
+				if logRecord.Type == data.LogRecordTypeBatchEnd {
+					//批量写结束标记，处理该批次的所有记录
+					for _, transaction := range batchRecords[seqNum] {
+						updateIndex(transaction.Record.Key, transaction.Record.Type, transaction.Pos)
+					}
+					delete(batchRecords, seqNum)
+				} else {
+					//暂存批量写入的记录
+					batchRecords[seqNum] = append(batchRecords[seqNum], &data.TransactionRecord{
+						Record: logRecord,
+						Pos:    logRecordPos,
+					})
+				}
 			}
-			if !ok {
-				return ErrIndexUpdateFailed
+			if seqNum > curSeqNum {
+				curSeqNum = seqNum
 			}
-
-			// 递增 offset，下一次从新的位置开始读取
 			offset += size
-		}
 
+			// 如果是当前活跃文件，更新这个文件的 WriteOff
+		}
 		// 如果是当前活跃文件，更新这个文件的 WriteOff
 		if i == len(db.fileIds)-1 {
 			db.activeDataFile.WriteOff = offset
 		}
 	}
+	db.seqNum = curSeqNum
 	return nil
 }
-
 func checkOptions(options Options) error {
 	if options.DirPath == "" {
 		return errors.New("database dir path is empty")

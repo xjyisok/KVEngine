@@ -26,6 +26,10 @@ type IteratorOptions struct {
 	// 是否反向遍历，默认 false 是正向
 	Reverse bool
 }
+type WriteBatchOptions struct {
+	MaxBatchSize int  //最大批量写入数量
+	SyncWrites   bool //是否每次写入都进行持久化
+}
 
 var DefaultOptions = Options{
 	DirPath:               os.TempDir(),
@@ -36,4 +40,8 @@ var DefaultOptions = Options{
 var DefaultIteratorOptions = IteratorOptions{
 	Prefix:  nil,
 	Reverse: false,
+}
+var DefaultWriteBatchOptions = WriteBatchOptions{
+	MaxBatchSize: 10000,
+	SyncWrites:   true,
 }
