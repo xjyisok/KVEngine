@@ -22,6 +22,37 @@ type DB struct {
 	fileIds        []int         // 文件 id，只能在加载索引的时候使用，不能在其他的地方更新和使用
 }
 
+// Close 关闭数据库
+func (db *DB) Close() error {
+	if db.activeDataFile == nil {
+		return nil
+	}
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	//	关闭当前活跃文件
+	if err := db.activeDataFile.Close(); err != nil {
+		return err
+	}
+	// 关闭旧的数据文件
+	for _, file := range db.olderDataFiles {
+		if err := file.Close(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Sync 持久化数据文件
+func (db *DB) Sync() error {
+	if db.activeDataFile == nil {
+		return nil
+	}
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	return db.activeDataFile.Sync()
+}
+
 // Open 打开 bitcask 存储引擎实例
 func Open(options Options) (*DB, error) {
 	// 对用户传入的配置项进行校验
@@ -115,6 +146,60 @@ func (db *DB) Get(key []byte) ([]byte, error) {
 	if logRecordPos == nil {
 		return nil, ErrKeyIsUnfound
 	} // 根据文件 id 找到对应的数据文件
+	return db.getValueByPosition(logRecordPos)
+	// var dataFile *data.DataFile
+	// if db.activeDataFile.Fid == logRecordPos.Fid {
+	// 	dataFile = db.activeDataFile
+	// } else {
+	// 	dataFile = db.olderDataFiles[logRecordPos.Fid]
+	// }
+	// // 数据文件为空
+	// if dataFile == nil {
+	// 	return nil, ErrDataFileNotFound
+	// }
+
+	// // 根据偏移读取对应的数据
+	// logRecord, _, err := dataFile.ReadLogRecord(logRecordPos.Offset)
+	// if err != nil {
+	// 	return nil, err
+	// }
+
+	// if logRecord.Type == data.LogRecordTypeDelete {
+	// 	return nil, ErrKeyIsUnfound
+	// }
+
+	// return logRecord.Value, nil
+}
+func (db *DB) ListKeys() [][]byte {
+	iterator := db.indexer.Iterator(false)
+	keys := make([][]byte, db.indexer.Size())
+	var idx int
+	for iterator.Rewind(); iterator.Valid(); iterator.Next() {
+		keys[idx] = iterator.Key()
+		idx++
+	}
+	return keys
+}
+func (db *DB) Fold(fn func(key []byte, value []byte) bool) error {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	iterator := db.indexer.Iterator(false)
+	for iterator.Rewind(); iterator.Valid(); iterator.Next() {
+		value, err := db.getValueByPosition(iterator.Value())
+		if err != nil {
+			return err
+		}
+		if !fn(iterator.Key(), value) {
+			break
+		}
+	}
+	return nil
+}
+
+// 根据索引信息获取对应的 value
+func (db *DB) getValueByPosition(logRecordPos *data.LogRecordPos) ([]byte, error) {
+	// 根据文件 id 找到对应的数据文件
 	var dataFile *data.DataFile
 	if db.activeDataFile.Fid == logRecordPos.Fid {
 		dataFile = db.activeDataFile

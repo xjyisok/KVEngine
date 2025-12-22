@@ -14,7 +14,7 @@ func destroyDB(db *DB) {
 		if db.activeDataFile != nil {
 			_ = db.activeDataFile.Close() // safe now
 		} // todo 实现了 Close 方法之后，这里使用 Close 方法替代
-		err := os.RemoveAll(db.options.DirPath)
+		err := db.Close()
 		if err != nil {
 			panic(err)
 		}
@@ -27,7 +27,8 @@ func TestOpen(t *testing.T) {
 	db, err := Open(opts)
 	assert.Nil(t, err)
 	assert.NotNil(t, db)
-	defer destroyDB(db)
+	//defer destroyDB(db)
+	db.Close()
 }
 
 func TestDB_Put(t *testing.T) {
@@ -36,7 +37,7 @@ func TestDB_Put(t *testing.T) {
 	opts.DirPath = dir
 	opts.DataFileSizeThreshold = 8 * 1024 * 1024
 	db, err := Open(opts)
-	defer destroyDB(db)
+	//defer destroyDB(db)
 	assert.Nil(t, err)
 	assert.NotNil(t, db)
 
@@ -87,6 +88,7 @@ func TestDB_Put(t *testing.T) {
 	val5, err := db2.Get(utils.GetTestKey(55))
 	assert.Nil(t, err)
 	assert.Equal(t, val4, val5)
+	db.Close()
 }
 
 func TestDB_Get(t *testing.T) {
@@ -95,7 +97,7 @@ func TestDB_Get(t *testing.T) {
 	opts.DirPath = dir
 	opts.DataFileSizeThreshold = 8 * 1024 * 1024
 	db, err := Open(opts)
-	defer destroyDB(db)
+	//defer destroyDB(db)
 	assert.Nil(t, err)
 	assert.NotNil(t, db)
 
@@ -158,6 +160,7 @@ func TestDB_Get(t *testing.T) {
 	val8, err := db.Get(utils.GetTestKey(33))
 	assert.Equal(t, 0, len(val8))
 	assert.Equal(t, ErrKeyIsUnfound, err)
+	db.Close()
 }
 
 func TestDB_Delete(t *testing.T) {
@@ -166,7 +169,7 @@ func TestDB_Delete(t *testing.T) {
 	opts.DirPath = dir
 	opts.DataFileSizeThreshold = 64 * 1024 * 1024
 	db, err := Open(opts)
-	defer destroyDB(db)
+	//defer destroyDB(db)
 	assert.Nil(t, err)
 	assert.NotNil(t, db)
 
@@ -211,4 +214,86 @@ func TestDB_Delete(t *testing.T) {
 	val2, err := db2.Get(utils.GetTestKey(22))
 	assert.Nil(t, err)
 	assert.Equal(t, val1, val2)
+	db.Close()
+}
+func TestDB_ListKeys(t *testing.T) {
+	opts := DefaultOptions
+	dir, _ := os.MkdirTemp("", "bitcask-go-delete")
+	opts.DirPath = dir
+	db, err := Open(opts)
+	assert.Nil(t, err)
+	//defer destroyDB(db)
+	keys := db.ListKeys()
+	assert.Equal(t, 0, len(keys))
+	t.Log(len(keys))
+
+	err = db.Put([]byte("aaa"), utils.RandomValue(10))
+	assert.Nil(t, err)
+	err = db.Put([]byte("bbb"), utils.RandomValue(10))
+	assert.Nil(t, err)
+	err = db.Put([]byte("ccc"), utils.RandomValue(10))
+	assert.Nil(t, err)
+
+	keys = db.ListKeys()
+	assert.Equal(t, 3, len(keys))
+	t.Log(len(keys))
+	db.Close()
+}
+func TestDB_Fold(t *testing.T) {
+	opts := DefaultOptions
+	dir, _ := os.MkdirTemp("", "bitcask-go-fold")
+	opts.DirPath = dir
+	db, err := Open(opts)
+	//defer destroyDB(db)
+	assert.Nil(t, err)
+	assert.NotNil(t, db)
+
+	err = db.Put(utils.GetTestKey(11), utils.RandomValue(20))
+	assert.Nil(t, err)
+	err = db.Put(utils.GetTestKey(22), utils.RandomValue(20))
+	assert.Nil(t, err)
+	err = db.Put(utils.GetTestKey(33), utils.RandomValue(20))
+	assert.Nil(t, err)
+	err = db.Put(utils.GetTestKey(44), utils.RandomValue(20))
+	assert.Nil(t, err)
+
+	err = db.Fold(func(key []byte, value []byte) bool {
+		assert.NotNil(t, key)
+		assert.NotNil(t, value)
+		return true
+	})
+	assert.Nil(t, err)
+	db.Close()
+}
+func TestDB_Close(t *testing.T) {
+	opts := DefaultOptions
+	dir, _ := os.MkdirTemp("", "bitcask-go-close")
+	opts.DirPath = dir
+	db, err := Open(opts)
+	//defer destroyDB(db)
+	assert.Nil(t, err)
+	assert.NotNil(t, db)
+
+	err = db.Put(utils.GetTestKey(11), utils.RandomValue(20))
+	assert.Nil(t, err)
+	err = db.Close()
+	assert.Nil(t, err)
+}
+
+func TestDB_Sync(t *testing.T) {
+	opts := DefaultOptions
+	dir, _ := os.MkdirTemp("", "bitcask-go-sync")
+	opts.DirPath = dir
+	db, err := Open(opts)
+	//defer destroyDB(db)
+	assert.Nil(t, err)
+	assert.NotNil(t, db)
+
+	err = db.Put(utils.GetTestKey(11), utils.RandomValue(20))
+	assert.Nil(t, err)
+
+	err = db.Sync()
+	assert.Nil(t, err)
+	err = db.Close()
+	assert.Nil(t, err)
 }
