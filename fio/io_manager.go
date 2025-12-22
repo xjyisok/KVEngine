@@ -7,4 +7,10 @@ type IOManager interface {
 	Write([]byte) (int, error)
 	Sync() error
 	Close() error
+	Size() (int64, error)
+}
+
+// 创建一个新的IO管理器，方便对接后续不同的IO实现
+func NewIOManager(fileName string) (IOManager, error) {
+	return newFileIOManager(fileName)
 }

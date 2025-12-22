@@ -2,9 +2,14 @@ package bitcaskgo
 
 import (
 	"bitcask-go/data"
-	"sync"
-
 	"bitcask-go/index"
+	"errors"
+	"io"
+	"os"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
 )
 
 // 主要实现面向用户的操作接口
@@ -14,6 +19,67 @@ type DB struct {
 	olderDataFiles map[uint32]*data.DataFile //旧的数据文件集合
 	options        Options
 	indexer        index.Indexer //内存索引
+	fileIds        []int         // 文件 id，只能在加载索引的时候使用，不能在其他的地方更新和使用
+}
+
+// Open 打开 bitcask 存储引擎实例
+func Open(options Options) (*DB, error) {
+	// 对用户传入的配置项进行校验
+	if err := checkOptions(options); err != nil {
+		return nil, err
+	}
+
+	// 判断数据目录是否存在，如果不存在的话，则创建这个目录
+	if _, err := os.Stat(options.DirPath); os.IsNotExist(err) {
+		if err := os.MkdirAll(options.DirPath, os.ModePerm); err != nil {
+			return nil, err
+		}
+	}
+
+	// 初始化 DB 实例结构体
+	db := &DB{
+		options:        options,
+		mu:             new(sync.RWMutex),
+		olderDataFiles: make(map[uint32]*data.DataFile),
+		indexer:        index.NewIndexer(options.IndexType),
+	}
+
+	// 加载数据文件
+	if err := db.loadDataFiles(); err != nil {
+		return nil, err
+	}
+
+	// 从数据文件中加载索引
+	if err := db.loadIndexFromDataFiles(); err != nil {
+		return nil, err
+	}
+
+	return db, nil
+}
+
+func (db *DB) Delete(key []byte) error {
+	//如果key为空，返回错误
+	if len(key) == 0 {
+		return ErrKeyIsEmpty
+	}
+	//构造logRecord结构体
+	record := &data.LogRecord{
+		Key:   key,
+		Value: nil,
+		Type:  data.LogRecordTypeDelete, //删除标记
+	}
+	if pos, _ := db.indexer.Get(key); pos == nil {
+		return nil
+	}
+	_, err := db.appnedLogRecord(record)
+	if err != nil {
+		return err
+	}
+	//更新内存索引
+	if ok := db.indexer.Delete(key); !ok {
+		return ErrIndexUpdateFailed
+	}
+	return nil
 }
 
 func (db *DB) Put(key []byte, value []byte) error {
@@ -117,7 +183,7 @@ func (db *DB) appnedLogRecord(record *data.LogRecord) (*data.LogRecordPos, error
 	}
 	//更新活跃文件的写入偏移量
 	//TODO 后续继承到datafile的Write方法中
-	db.activeDataFile.WriteOff += size
+	//db.activeDataFile.WriteOff += size
 	return logRecordPos, nil
 }
 
@@ -134,5 +200,114 @@ func (db *DB) setActiveDataFile() error {
 		panic(err)
 	}
 	db.activeDataFile = dataFile
+	return nil
+}
+
+// 从磁盘中加载数据文件
+func (db *DB) loadDataFiles() error {
+	dirEntries, err := os.ReadDir(db.options.DirPath)
+	if err != nil {
+		return err
+	}
+
+	var fileIds []int
+	// 遍历目录中的所有文件，找到所有以 .data 结尾的文件
+	for _, entry := range dirEntries {
+		if strings.HasSuffix(entry.Name(), data.DataFileNameSuffix) {
+			splitNames := strings.Split(entry.Name(), ".")
+			fileId, err := strconv.Atoi(splitNames[0])
+			// 数据目录有可能被损坏了
+			if err != nil {
+				return ErrDataDirectoryCorrupted
+			}
+			fileIds = append(fileIds, fileId)
+		}
+	}
+
+	//	对文件 id 进行排序，从小到大依次加载
+	sort.Ints(fileIds)
+	db.fileIds = fileIds
+
+	// 遍历每个文件id，打开对应的数据文件
+	for i, fid := range fileIds {
+		dataFile, err := data.OpenDataFile(db.options.DirPath, uint32(fid))
+		if err != nil {
+			return err
+		}
+		if i == len(fileIds)-1 { // 最后一个，id是最大的，说明是当前活跃文件
+			db.activeDataFile = dataFile
+		} else { // 说明是旧的数据文件
+			db.olderDataFiles[uint32(fid)] = dataFile
+		}
+	}
+	return nil
+}
+
+// 从数据文件中加载索引
+// 遍历文件中的所有记录，并更新到内存索引中
+func (db *DB) loadIndexFromDataFiles() error {
+	// 没有文件，说明数据库是空的，直接返回
+	if len(db.fileIds) == 0 {
+		return nil
+	}
+
+	// 遍历所有的文件id，处理文件中的记录
+	for i, fid := range db.fileIds {
+		var fileId = uint32(fid)
+		var dataFile *data.DataFile
+		if fileId == db.activeDataFile.Fid {
+			dataFile = db.activeDataFile
+		} else {
+			dataFile = db.olderDataFiles[fileId]
+		}
+
+		var offset int64 = 0
+		for {
+			logRecord, size, err := dataFile.ReadLogRecord(offset)
+
+			if err != nil {
+				if err == io.EOF {
+					break
+				}
+				return err
+			}
+			//fmt.Printf("type:%d,keySize:%d,valueSize:%d\n", logRecord.Type, len(logRecord.Key), len(logRecord.Value))
+			// 构造内存索引并保存
+			logRecordPos := &data.LogRecordPos{Fid: fileId, Offset: offset}
+			var ok bool
+			if logRecord.Type == data.LogRecordTypeDelete {
+				//NOTE这里由于bitcask是追加写入所以删除操作只是添加了一个删除标记，并没有真正删除数据文件中的数据
+				//所以在加载索引时需要将该key从内存索引中删除
+				//比如用户先执行了put(k1,v1)然后delete(k1)最后再put(k1,v2)
+				//那么数据文件中会有三条记录，k1:v1、k1:delete标记、k1:v2
+				//在加载索引时会先将k1指向v1的位置，然后再将k1从内存索引中删除，最后再将k1指向v2的位置
+				//这样就保证了内存索引中的数据是最新的
+				ok = db.indexer.Delete(logRecord.Key)
+			} else {
+				ok = db.indexer.Put(logRecord.Key, logRecordPos)
+			}
+			if !ok {
+				return ErrIndexUpdateFailed
+			}
+
+			// 递增 offset，下一次从新的位置开始读取
+			offset += size
+		}
+
+		// 如果是当前活跃文件，更新这个文件的 WriteOff
+		if i == len(db.fileIds)-1 {
+			db.activeDataFile.WriteOff = offset
+		}
+	}
+	return nil
+}
+
+func checkOptions(options Options) error {
+	if options.DirPath == "" {
+		return errors.New("database dir path is empty")
+	}
+	if options.DataFileSizeThreshold <= 0 {
+		return errors.New("database data file size must be greater than 0")
+	}
 	return nil
 }
