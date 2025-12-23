@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
+	"path/filepath"
 )
 
 var (
@@ -23,18 +24,41 @@ type DataFile struct {
 // 4 + 1+5+5=15	keySize和valueSize使用变长编码节省磁盘空间
 const maxLogRecordHeaderSize = binary.MaxVarintLen32*2 + 1 + 4 //日志记录最大头部大小
 
-const DataFileNameSuffix = ".data"
+const (
+	DataFileNameSuffix    = ".data"
+	HintFileName          = "hint-index"
+	MergeFinishedFileName = "merge-finished"
+)
 
 // 初始化数据文件
 func OpenDataFile(dirPath string, fid uint32) (*DataFile, error) {
-	fileName := fmt.Sprintf("%09d", fid) + DataFileNameSuffix
-	ioManager, err := fio.NewIOManager(dirPath + "/" + fileName)
+	fileName := GetDataFileName(dirPath, fid)
+	return newDataFile(fileName, fid)
+}
+
+// 获取文件名
+func GetDataFileName(dirPath string, fileId uint32) string {
+	return filepath.Join(dirPath, fmt.Sprintf("%09d", fileId)+DataFileNameSuffix)
+}
+
+// 初始化hint文件
+func OpenHintFile(dirPath string) (*DataFile, error) {
+	fileName := filepath.Join(dirPath, HintFileName)
+	return newDataFile(fileName, 0)
+}
+func OpenMergeFinishedFile(dirPath string) (*DataFile, error) {
+	fileName := filepath.Join(dirPath, MergeFinishedFileName)
+	return newDataFile(fileName, 0)
+}
+func newDataFile(fileName string, fileId uint32) (*DataFile, error) {
+	// 初始化 IOManager 管理器接口
+	ioManager, err := fio.NewIOManager(fileName)
 	if err != nil {
 		return nil, err
 	}
 	return &DataFile{
-		Fid:      fid,
-		WriteOff: 0, //初始化写入偏移量为0,后续写入数据时更新,在初始化indexer的时候是从文件头开始读数据创建索引的
+		Fid:      fileId,
+		WriteOff: 0,
 		IO:       ioManager,
 	}, nil
 }
@@ -49,6 +73,7 @@ func (df *DataFile) Write(buf []byte) error {
 	df.WriteOff += int64(n)
 	return nil
 }
+
 func (df *DataFile) Close() error {
 	return df.IO.Close()
 }
@@ -116,4 +141,12 @@ func (df *DataFile) readNBytes(offset int64, n int) ([]byte, error) {
 		return nil, err
 	}
 	return buf, nil
+}
+func (df *DataFile) WriteHintRecord(key []byte, pos *LogRecordPos) error {
+	hintRecord := &LogRecord{
+		Key:   key,
+		Value: EncodeLogRecordPos(pos),
+	}
+	encRecord, _ := EncodeLogRecord(hintRecord)
+	return df.Write(encRecord)
 }

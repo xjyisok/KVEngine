@@ -11,4 +11,5 @@ var (
 	ErrDataDirectoryCorrupted = errors.New("the database directory maybe corrupted")
 	ErrInvalidCRC             = errors.New("the log record crc is invalid")
 	ErrExceedMaxBatchSize     = errors.New("the batch size exceeds the maximum limit")
+	ErrMergeIsRunning		= errors.New("merge operation is already running")
 )

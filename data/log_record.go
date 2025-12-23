@@ -92,6 +92,21 @@ func DecodeLogRecordHeader(data []byte) (*LogRecordHeader, int64) {
 
 	return header, int64(index)
 }
+func EncodeLogRecordPos(pos *LogRecordPos) []byte {
+	buf := make([]byte, binary.MaxVarintLen32+binary.MaxVarintLen64)
+	var index = 0
+	index += binary.PutVarint(buf[index:], int64(pos.Fid))
+	index += binary.PutVarint(buf[index:], pos.Offset)
+	return buf[:index]
+}
+
+func DecodeLogReordPos(buf []byte) *LogRecordPos {
+	var index = 0
+	fileId, n := binary.Varint(buf[index:])
+	index += n
+	offset, _ := binary.Varint(buf[index:])
+	return &LogRecordPos{Fid: uint32(fileId), Offset: offset}
+}
 func getLogRecordCRC(logRecord *LogRecord, headerbuf []byte) uint32 {
 	if logRecord == nil {
 		return 0
