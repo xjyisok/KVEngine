@@ -14,16 +14,23 @@ import (
 	"sync"
 )
 
+const (
+	seqNoKey     = "seq.no"
+	fileLockName = "flock"
+)
+
 // 主要实现面向用户的操作接口
 type DB struct {
-	mu             *sync.RWMutex
-	activeDataFile *data.DataFile            //当前活跃的数据文件
-	olderDataFiles map[uint32]*data.DataFile //旧的数据文件集合
-	options        Options
-	indexer        index.Indexer //内存索引
-	fileIds        []int         // 文件 id，只能在加载索引的时候使用，不能在其他的地方更新和使用
-	seqNum         uint64        //全局事务序列号
-	isMerging      bool          //是否正在进行merge操作的标记，0表示没有，1表示正在进行
+	mu              *sync.RWMutex
+	activeDataFile  *data.DataFile            //当前活跃的数据文件
+	olderDataFiles  map[uint32]*data.DataFile //旧的数据文件集合
+	options         Options
+	indexer         index.Indexer //内存索引
+	fileIds         []int         // 文件 id，只能在加载索引的时候使用，不能在其他的地方更新和使用
+	seqNum          uint64        //全局事务序列号
+	isMerging       bool          //是否正在进行merge操作的标记，0表示没有，1表示正在进行
+	seqNoFileExists bool          // 存储事务序列号的文件是否存在isSeq
+	isInitial       bool          // 是否是第一次初始化此数据目录
 }
 
 // Close 关闭数据库
@@ -33,7 +40,26 @@ func (db *DB) Close() error {
 	}
 	db.mu.Lock()
 	defer db.mu.Unlock()
+	if err := db.indexer.Close(); err != nil {
+		return err
+	}
 
+	// 保存当前事务序列号
+	seqNoFile, err := data.OpenSeqNoFile(db.options.DirPath)
+	if err != nil {
+		return err
+	}
+	record := &data.LogRecord{
+		Key:   []byte(seqNoKey),
+		Value: []byte(strconv.FormatUint(db.seqNum, 10)),
+	}
+	encRecord, _ := data.EncodeLogRecord(record)
+	if err := seqNoFile.Write(encRecord); err != nil {
+		return err
+	}
+	if err := seqNoFile.Sync(); err != nil {
+		return err
+	}
 	//	关闭当前活跃文件
 	if err := db.activeDataFile.Close(); err != nil {
 		return err
@@ -63,12 +89,20 @@ func Open(options Options) (*DB, error) {
 	if err := checkOptions(options); err != nil {
 		return nil, err
 	}
-
+	var isInitial bool
 	// 判断数据目录是否存在，如果不存在的话，则创建这个目录
 	if _, err := os.Stat(options.DirPath); os.IsNotExist(err) {
+		isInitial = true
 		if err := os.MkdirAll(options.DirPath, os.ModePerm); err != nil {
 			return nil, err
 		}
+	}
+	entries, err := os.ReadDir(options.DirPath)
+	if err != nil {
+		return nil, err
+	}
+	if len(entries) == 0 {
+		isInitial = true
 	}
 
 	// 初始化 DB 实例结构体
@@ -76,24 +110,42 @@ func Open(options Options) (*DB, error) {
 		options:        options,
 		mu:             new(sync.RWMutex),
 		olderDataFiles: make(map[uint32]*data.DataFile),
-		indexer:        index.NewIndexer(options.IndexType),
+		indexer:        index.NewIndexer(options.IndexType, options.DirPath, options.SyncWrites),
+		isInitial:      isInitial,
 	}
 	//加载数据文件之前加载merge数据目录
-	if err:= db.loadMergeFiles(); err != nil {
+	if err := db.loadMergeFiles(); err != nil {
 		return nil, err
 	}
 	// 加载数据文件
 	if err := db.loadDataFiles(); err != nil {
 		return nil, err
 	}
-	//从hintfile加载索引
-	if err := db.loadIndexFromHintFile(); err != nil {
-		return nil, err
+	//非持久化B+树索引需要从hintfile和数据文件中加载索引
+	if options.IndexType != index.BPlustree {
+		//从hintfile加载索引
+		if err := db.loadIndexFromHintFile(); err != nil {
+			return nil, err
+		}
+		// 从数据文件中加载索引
+		if err := db.loadIndexFromDataFiles(); err != nil {
+			return nil, err
+		}
 	}
-	// 从数据文件中加载索引
-	if err := db.loadIndexFromDataFiles(); err != nil {
-		return nil, err
+	if options.IndexType == index.BPlustree {
+		//持久化B+树索引需要从seqno文件中加载事务序列号
+		if err := db.loadSeqNo(); err != nil {
+			return nil, err
+		}
+		if db.activeDataFile != nil {
+			size, err := db.activeDataFile.IO.Size()
+			if err != nil {
+				return nil, err
+			}
+			db.activeDataFile.WriteOff = size
+		}
 	}
+	//如果是持久化B+树索引需要从seqno文件中加载事务序列号
 
 	return db, nil
 }
@@ -193,8 +245,9 @@ func (db *DB) ListKeys() [][]byte {
 func (db *DB) Fold(fn func(key []byte, value []byte) bool) error {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
-
+	
 	iterator := db.indexer.Iterator(false)
+	defer iterator.Close()
 	for iterator.Rewind(); iterator.Valid(); iterator.Next() {
 		value, err := db.getValueByPosition(iterator.Value())
 		if err != nil {
@@ -351,15 +404,15 @@ func (db *DB) loadIndexFromDataFiles() error {
 		return nil
 	}
 	//查看是否发生过merge操作
-	hasMerge,nonMergeFileId:=false,uint32(0)
-	mergeFinFileName:=filepath.Join(db.options.DirPath,data.MergeFinishedFileName)
-	if _,err:=os.Stat(mergeFinFileName);err==nil {
-		fid,err:=db.getNonMergeFileId(db.options.DirPath)
-		if err!=nil {
+	hasMerge, nonMergeFileId := false, uint32(0)
+	mergeFinFileName := filepath.Join(db.options.DirPath, data.MergeFinishedFileName)
+	if _, err := os.Stat(mergeFinFileName); err == nil {
+		fid, err := db.getNonMergeFileId(db.options.DirPath)
+		if err != nil {
 			return err
 		}
-		hasMerge=true
-		nonMergeFileId=fid
+		hasMerge = true
+		nonMergeFileId = fid
 	}
 	updateIndex := func(key []byte, Type data.LogRecordType, logRecordPos *data.LogRecordPos) error {
 		var ok bool
@@ -453,4 +506,24 @@ func checkOptions(options Options) error {
 		return errors.New("database data file size must be greater than 0")
 	}
 	return nil
+}
+func (db *DB) loadSeqNo() error {
+	fileName := filepath.Join(db.options.DirPath, data.SeqNoFileName)
+	if _, err := os.Stat(fileName); os.IsNotExist(err) {
+		return nil
+	}
+
+	seqNoFile, err := data.OpenSeqNoFile(db.options.DirPath)
+	if err != nil {
+		return err
+	}
+	record, _, err := seqNoFile.ReadLogRecord(0)
+	seqNo, err := strconv.ParseUint(string(record.Value), 10, 64)
+	if err != nil {
+		return err
+	}
+	db.seqNum = seqNo
+	db.seqNoFileExists = true
+
+	return os.Remove(fileName)
 }

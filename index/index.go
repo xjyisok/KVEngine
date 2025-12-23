@@ -14,6 +14,7 @@ type Indexer interface {
 	Delete(key []byte) bool
 	Iterator(reverse bool) Iterator
 	Size() int64
+	Close()error
 }
 type IndexType = int8
 
@@ -23,6 +24,8 @@ const (
 
 	// ART 自适应基数树索引
 	ART
+	// BPlusTree B+树索引
+	BPlustree
 )
 
 // BtreeCRUD节点重写
@@ -34,12 +37,14 @@ type Item struct {
 func (it *Item) Less(bi btree.Item) bool {
 	return bytes.Compare(it.key, bi.(*Item).key) == -1
 }
-func NewIndexer(indexType IndexType) Indexer {
+func NewIndexer(indexType IndexType, dirPath string,sync bool) Indexer {
 	switch indexType {
 	case Btree:
 		return NewBTree(32)
 	case ART:
-		return nil
+		return NewART()
+	case BPlustree:
+		return NewBPlusTree(dirPath, sync)
 	default:
 		panic("unsupported index type")
 	}

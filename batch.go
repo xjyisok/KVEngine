@@ -2,6 +2,7 @@ package bitcaskgo
 
 import (
 	"bitcask-go/data"
+	"bitcask-go/index"
 	"encoding/binary"
 	"sync"
 	"sync/atomic"
@@ -19,6 +20,9 @@ type WriteBatch struct {
 }
 
 func (db *DB) NewWriteBatch(opts WriteBatchOptions) *WriteBatch {
+	if db.options.IndexType == index.BPlustree && !db.seqNoFileExists && !db.isInitial {
+		panic("cannot create WriteBatch when using persistent BPlusTree index before loading seqNo")
+	}
 	return &WriteBatch{
 		mu:          new(sync.RWMutex),
 		db:          db,
