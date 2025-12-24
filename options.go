@@ -1,13 +1,17 @@
 package bitcaskgo
 
-import "os"
+import (
+	"os"
+)
 
 type Options struct {
 	DirPath               string //数据文件存储路径
 	DataFileSizeThreshold uint32 //数据文件大小阈值
 	SyncWrites            bool   //是否每次写入都进行持久化
 	// 索引类型
-	IndexType IndexerType
+	IndexType    IndexerType
+	BytesPerSync uint //每次同步写入的字节数
+	MMapIsOpen   bool //是否使用内存映射IO
 }
 type IndexerType = int8
 
@@ -37,7 +41,8 @@ var DefaultOptions = Options{
 	DirPath:               os.TempDir(),
 	DataFileSizeThreshold: 256 * 1024 * 1024, // 256MB
 	SyncWrites:            false,
-	IndexType:             BPlusTree,
+	IndexType:             BTree,
+	BytesPerSync:          0, //默认不启用每隔多少字节同步写入
 }
 var DefaultIteratorOptions = IteratorOptions{
 	Prefix:  nil,

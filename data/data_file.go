@@ -32,9 +32,10 @@ const (
 )
 
 // 初始化数据文件
-func OpenDataFile(dirPath string, fid uint32) (*DataFile, error) {
+// 只有在打开数据文件加载索引时需要传入ioType参数，hint文件和seqNo文件等辅助文件都使用标准IO
+func OpenDataFile(dirPath string, fid uint32, ioType fio.IOType) (*DataFile, error) {
 	fileName := GetDataFileName(dirPath, fid)
-	return newDataFile(fileName, fid)
+	return newDataFile(fileName, fid, ioType)
 }
 
 // 获取文件名
@@ -45,21 +46,21 @@ func GetDataFileName(dirPath string, fileId uint32) string {
 // 初始化hint文件
 func OpenHintFile(dirPath string) (*DataFile, error) {
 	fileName := filepath.Join(dirPath, HintFileName)
-	return newDataFile(fileName, 0)
+	return newDataFile(fileName, 0, fio.StandardIO)
 }
 func OpenMergeFinishedFile(dirPath string) (*DataFile, error) {
 	fileName := filepath.Join(dirPath, MergeFinishedFileName)
-	return newDataFile(fileName, 0)
+	return newDataFile(fileName, 0, fio.StandardIO)
 }
 
 // OpenSeqNoFile 存储事务序列号的文件
 func OpenSeqNoFile(dirPath string) (*DataFile, error) {
 	fileName := filepath.Join(dirPath, SeqNoFileName)
-	return newDataFile(fileName, 0)
+	return newDataFile(fileName, 0, fio.StandardIO)
 }
-func newDataFile(fileName string, fileId uint32) (*DataFile, error) {
+func newDataFile(fileName string, fileId uint32, ioType fio.IOType) (*DataFile, error) {
 	// 初始化 IOManager 管理器接口
-	ioManager, err := fio.NewIOManager(fileName)
+	ioManager, err := fio.NewIOManager(fileName, ioType)
 	if err != nil {
 		return nil, err
 	}
@@ -156,4 +157,15 @@ func (df *DataFile) WriteHintRecord(key []byte, pos *LogRecordPos) error {
 	}
 	encRecord, _ := EncodeLogRecord(hintRecord)
 	return df.Write(encRecord)
+}
+func (df *DataFile) SetIOManager(dirPath string, ioType fio.IOType) error {
+	if err := df.IO.Close(); err != nil {
+		return err
+	}
+	ioManager, err := fio.NewIOManager(GetDataFileName(dirPath, df.Fid), ioType)
+	if err != nil {
+		return err
+	}
+	df.IO = ioManager
+	return nil
 }

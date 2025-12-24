@@ -12,4 +12,5 @@ var (
 	ErrInvalidCRC             = errors.New("the log record crc is invalid")
 	ErrExceedMaxBatchSize     = errors.New("the batch size exceeds the maximum limit")
 	ErrMergeIsRunning		= errors.New("merge operation is already running")
+	ErrFileIsLocked		= errors.New("data directory is locked by other process")
 )
