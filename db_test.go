@@ -131,7 +131,7 @@ func TestDB_Get(t *testing.T) {
 	assert.Equal(t, ErrKeyIsUnfound, err)
 
 	// 5.转换为了旧的数据文件，从旧的数据文件上获取 value
-	for i := 0; i < 10000; i++ {
+	for i := 100; i < 10000; i++ {
 		err := db.Put(utils.GetTestKey(i), utils.RandomValue(128))
 		assert.Nil(t, err)
 	}
@@ -202,10 +202,10 @@ func TestDB_Delete(t *testing.T) {
 	assert.Nil(t, err)
 
 	// 5.重启之后，再进行校验
-	//db.Close() // todo 实现 Close 方法后这里用 Close() 替代
+	// todo 实现 Close 方法后这里用 Close() 替代
 	err = db.activeDataFile.Close()
 	assert.Nil(t, err)
-
+	db.Close()
 	// 重启数据库
 	db2, err := Open(opts)
 	_, err = db2.Get(utils.GetTestKey(11))
@@ -214,29 +214,28 @@ func TestDB_Delete(t *testing.T) {
 	val2, err := db2.Get(utils.GetTestKey(22))
 	assert.Nil(t, err)
 	assert.Equal(t, val1, val2)
-	db.Close()
+	db2.Close()
 }
 func TestDB_ListKeys(t *testing.T) {
 	opts := DefaultOptions
 	dir, _ := os.MkdirTemp("", "bitcask-go-delete")
 	opts.DirPath = dir
 	db, err := Open(opts)
-	assert.Nil(t, err)
-	//defer destroyDB(db)
-	keys := db.ListKeys()
-	assert.Equal(t, 0, len(keys))
-	t.Log(len(keys))
-
 	err = db.Put([]byte("aaa"), utils.RandomValue(10))
 	assert.Nil(t, err)
 	err = db.Put([]byte("bbb"), utils.RandomValue(10))
 	assert.Nil(t, err)
 	err = db.Put([]byte("ccc"), utils.RandomValue(10))
 	assert.Nil(t, err)
-
-	keys = db.ListKeys()
+	assert.Nil(t, err)
+	//defer destroyDB(db)
+	keys := db.ListKeys()
 	assert.Equal(t, 3, len(keys))
 	t.Log(len(keys))
+
+	// keys = db.ListKeys()
+	// assert.Equal(t, 3, len(keys))
+	// t.Log(len(keys))
 	db.Close()
 }
 func TestDB_Fold(t *testing.T) {

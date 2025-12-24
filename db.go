@@ -39,10 +39,10 @@ func (db *DB) Close() error {
 		return nil
 	}
 	db.mu.Lock()
-	defer db.mu.Unlock()
-	if err := db.indexer.Close(); err != nil {
-		return err
-	}
+	//defer db.mu.Unlock()
+	// if err := db.indexer.Close(); err != nil {
+	// 	return err
+	// }
 
 	// 保存当前事务序列号
 	seqNoFile, err := data.OpenSeqNoFile(db.options.DirPath)
@@ -69,6 +69,10 @@ func (db *DB) Close() error {
 		if err := file.Close(); err != nil {
 			return err
 		}
+	}
+	db.mu.Unlock()
+	if err := db.indexer.Close(); err != nil {
+		return err
 	}
 	return nil
 }
@@ -240,12 +244,13 @@ func (db *DB) ListKeys() [][]byte {
 		keys[idx] = iterator.Key()
 		idx++
 	}
+	iterator.Close()
 	return keys
 }
 func (db *DB) Fold(fn func(key []byte, value []byte) bool) error {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
-	
+
 	iterator := db.indexer.Iterator(false)
 	defer iterator.Close()
 	for iterator.Rewind(); iterator.Valid(); iterator.Next() {

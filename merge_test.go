@@ -36,4 +36,5 @@ func TestDB_Merge(t *testing.T) {
 		}
 	}
 	db.Merge()
+	db.Close()
 }
