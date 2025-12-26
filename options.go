@@ -9,9 +9,10 @@ type Options struct {
 	DataFileSizeThreshold uint32 //数据文件大小阈值
 	SyncWrites            bool   //是否每次写入都进行持久化
 	// 索引类型
-	IndexType    IndexerType
-	BytesPerSync uint //每次同步写入的字节数
-	MMapIsOpen   bool //是否使用内存映射IO
+	IndexType          IndexerType
+	BytesPerSync       uint    //每次同步写入的字节数
+	MMapIsOpen         bool    //是否使用内存映射IO
+	DataFileMergeRatio float32 //数据文件merge操作的无效数据merge比例
 }
 type IndexerType = int8
 
@@ -43,6 +44,7 @@ var DefaultOptions = Options{
 	SyncWrites:            false,
 	IndexType:             BTree,
 	BytesPerSync:          0, //默认不启用每隔多少字节同步写入
+	DataFileMergeRatio:    0.5,
 }
 var DefaultIteratorOptions = IteratorOptions{
 	Prefix:  nil,

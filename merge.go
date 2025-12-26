@@ -2,6 +2,8 @@ package bitcaskgo
 
 import (
 	"bitcask-go/data"
+	"bitcask-go/utils"
+	"fmt"
 	"io"
 	"os"
 	"path"
@@ -26,6 +28,24 @@ func (db *DB) Merge() error {
 	if db.isMerging {
 		db.mu.Unlock()
 		return ErrMergeIsRunning
+	}
+	totalSize, err := utils.DirSize(db.options.DirPath)
+	if err != nil {
+		return err
+	}
+	useLessRatio := db.reclaimableSize / totalSize
+	if db.options.DataFileMergeRatio > float32(useLessRatio) {
+		db.mu.Unlock()
+		return ErrMergeTime
+	} // 查看剩余的空间容量是否可以容纳 Merge 后的数据
+	availableDiskSize, err := utils.AvailableDiskSize()
+	if err != nil {
+		db.mu.Unlock()
+		return err
+	}
+	if uint64(totalSize-db.reclaimableSize) >= availableDiskSize {
+		db.mu.Unlock()
+		return ErrNoEnoughDiskForMerge
 	}
 	db.isMerging = true
 	defer func() {
@@ -78,10 +98,19 @@ func (db *DB) Merge() error {
 		return err
 	}
 	//遍历所有需要merge的文件
+	//count := 0
 	for _, file := range mergeFileIds {
+		fmt.Printf("merge fid:%d", file.Fid)
 		var offset int64 = 0
+		var offsetHint int64 = 0
 		for {
+			//fmt.Printf("Index size\n")
 			logRecord, size, err := file.ReadLogRecord(offset)
+			fmt.Printf("Index size :%d", size)
+			// if count >= 49500 {
+			// 	fmt.Printf("Index size :%d\n", size)
+			// 	//fmt.Printf("logrecordKey:%s,logrecordValue:%s\n", string(logRecord.Key), string(logRecord.Value))
+			// }
 			if err != nil {
 				if err == io.EOF {
 					break
@@ -95,17 +124,26 @@ func (db *DB) Merge() error {
 				//清除事务标记，能持久化到磁盘中的数据肯定已经是一个完整的事务
 				logRecord.Key = logRecordKeyWithSeq(nonTransaction, realKey)
 				//将符合条件的数据写入到mergeDB中
-				_, err := mergeDB.appnedLogRecord(logRecord)
+				hintpos, err := mergeDB.appnedLogRecord(logRecord)
 				if err != nil {
 					return err
 				}
+				hinRecordPos := &data.LogRecordPos{
+					Fid:    mergeDB.activeDataFile.Fid,
+					Offset: hintpos.Offset,
+					Size:   hintpos.Size,
+				}
 				//将当前位置索引写入到Hint文件中
-				if err := hintFile.WriteHintRecord(realKey, logRecordPos); err != nil {
+				//fmt.Printf("HintFileOOOOOOOOOOFFFFFFFFset:%d Size:%d\n", offsetHint, size)
+				if err := hintFile.WriteHintRecord(realKey, hinRecordPos); err != nil {
 					return err
 				}
+				offsetHint += size
 			}
 			offset += size
+			//count++
 		}
+		fmt.Printf("hintoffset:%d", offsetHint)
 	}
 	//sync 保证持久化
 	if err := mergeDB.Sync(); err != nil {
@@ -138,7 +176,8 @@ func (db *DB) getMergePath() string {
 	base := path.Base(db.options.DirPath)
 	return filepath.Join(dir, base) + mergeDirName
 }
-//数据库启动时自动加载merge数据目录
+
+// 数据库启动时自动加载merge数据目录
 func (db *DB) loadMergeFiles() error {
 	mergePath := db.getMergePath()
 	if _, err := os.Stat(mergePath); os.IsNotExist(err) {
@@ -160,7 +199,7 @@ func (db *DB) loadMergeFiles() error {
 		if entry.Name() == data.MergeFinishedFileName {
 			mergeFinished = true
 		}
-		if entry.Name() == data.SeqNoFileName{
+		if entry.Name() == data.SeqNoFileName {
 			continue
 		}
 		fileNames = append(fileNames, entry.Name())
@@ -175,6 +214,7 @@ func (db *DB) loadMergeFiles() error {
 	}
 	//	先删除旧的数据文件
 	var fileId uint32 = 0
+	//fmt.Printf("noMergedFileId:%d", nonMergeFileId)
 	for ; fileId < nonMergeFileId; fileId++ {
 		fileName := data.GetDataFileName(db.options.DirPath, fileId)
 		if _, err := os.Stat(fileName); err == nil {
@@ -209,6 +249,7 @@ func (db *DB) loadIndexFromHintFile() error {
 	var offset int64 = 0
 	for {
 		logRecord, size, err := hintFile.ReadLogRecord(offset)
+		//fmt.Printf("size:%d", size)
 		if err != nil {
 			if err == io.EOF {
 				break
@@ -216,6 +257,8 @@ func (db *DB) loadIndexFromHintFile() error {
 			return err
 		}
 		logReordPos := data.DecodeLogReordPos(logRecord.Value)
+		// fmt.Printf("logrecordKey:%s\n", string(logRecord.Key))
+		// fmt.Printf("keyloadedhintFile:key%s,fid:%d,offset:%d,size:%d\n", string(logRecord.Key), logReordPos.Fid, logReordPos.Offset, logReordPos.Size)
 		db.indexer.Put(logRecord.Key, logReordPos)
 		offset += size
 	}

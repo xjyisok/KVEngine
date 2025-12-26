@@ -100,6 +100,7 @@ func (df *DataFile) ReadLogRecord(offset int64) (*LogRecord, int64, error) {
 	//实际上logRecordHeader最大也就15字节，所以是可能存在读超文件末尾的，例如文件只剩12字节了，crc+type+keySize+valueSize的变长编码占了8字节，kV四字节刚好给文件填满
 	//这时候如果还是按照15字节去读就会读超文件末尾
 	if offset+maxLogRecordHeaderSize > fileSize {
+		fmt.Printf("filesize:%d,offset:%d\n", fileSize, offset)
 		headerReadBytes = int(fileSize - offset)
 	}
 	// 读取头部信息
@@ -113,15 +114,18 @@ func (df *DataFile) ReadLogRecord(offset int64) (*LogRecord, int64, error) {
 	// }
 	logRecordHeader, headerSize := DecodeLogRecordHeader(headerbuf)
 	if logRecordHeader == nil {
+		fmt.Print("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n")
 		return nil, 0, io.EOF
 	}
 	//读到文件末尾了
 	if logRecordHeader.KeySize == 0 && logRecordHeader.ValueSize == 0 && logRecordHeader.crc == 0 {
+		fmt.Printf("BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB\n")
 		return nil, 0, io.EOF
 	}
 	// 取出对应的 key 和 value 的长度
 	keySize, valueSize := int64(logRecordHeader.KeySize), int64(logRecordHeader.ValueSize)
 	var recordSize = headerSize + keySize + valueSize
+	//fmt.Printf("headerSize:%d keySize:%d valueSize:%d\n", headerSize, keySize, valueSize)
 	LogRecord := &LogRecord{
 		Type: logRecordHeader.Type,
 	}

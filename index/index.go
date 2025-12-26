@@ -9,12 +9,12 @@ import (
 )
 
 type Indexer interface {
-	Put(key []byte, record *data.LogRecordPos) bool
+	Put(key []byte, record *data.LogRecordPos) (*data.LogRecordPos, bool)
 	Get(key []byte) (*data.LogRecordPos, bool)
-	Delete(key []byte) bool
+	Delete(key []byte) (*data.LogRecordPos, bool)
 	Iterator(reverse bool) Iterator
 	Size() int64
-	Close()error
+	Close() error
 }
 type IndexType = int8
 
@@ -37,7 +37,7 @@ type Item struct {
 func (it *Item) Less(bi btree.Item) bool {
 	return bytes.Compare(it.key, bi.(*Item).key) == -1
 }
-func NewIndexer(indexType IndexType, dirPath string,sync bool) Indexer {
+func NewIndexer(indexType IndexType, dirPath string, sync bool) Indexer {
 	switch indexType {
 	case Btree:
 		return NewBTree(32)

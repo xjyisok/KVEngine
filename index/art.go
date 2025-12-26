@@ -24,11 +24,14 @@ func NewART() *AdaptiveRadixTree {
 	}
 }
 
-func (art *AdaptiveRadixTree) Put(key []byte, pos *data.LogRecordPos) bool {
+func (art *AdaptiveRadixTree) Put(key []byte, pos *data.LogRecordPos) (*data.LogRecordPos, bool) {
 	art.lock.Lock()
-	art.tree.Insert(key, pos)
+	oldValue, _ := art.tree.Insert(key, pos)
 	art.lock.Unlock()
-	return true
+	if oldValue == nil {
+		return nil, false
+	}
+	return oldValue.(*data.LogRecordPos), true
 }
 
 // Get 根据 key 取出对应的索引位置信息
@@ -43,11 +46,14 @@ func (art *AdaptiveRadixTree) Get(key []byte) (*data.LogRecordPos, bool) {
 }
 
 // Delete 根据 key 删除对应的索引位置信息
-func (art *AdaptiveRadixTree) Delete(key []byte) bool {
+func (art *AdaptiveRadixTree) Delete(key []byte) (*data.LogRecordPos, bool) {
 	art.lock.Lock()
-	_, deleted := art.tree.Delete(key)
+	oldValue, deleted := art.tree.Delete(key)
 	art.lock.Unlock()
-	return deleted
+	if oldValue == nil {
+		return nil, false
+	}
+	return oldValue.(*data.LogRecordPos), deleted
 }
 
 // Size 索引中的数据量
@@ -68,6 +74,7 @@ func (art *AdaptiveRadixTree) Iterator(reverse bool) Iterator {
 func (art *AdaptiveRadixTree) Close() error {
 	return nil
 }
+
 // ART 索引迭代器
 type artIterator struct {
 	currIndex int     // 当前遍历的下标位置

@@ -111,14 +111,14 @@ func (wb *WriteBatch) Commit() error {
 	//更新内存索引
 	for _, record := range wb.pendingPuts {
 		logRecordPos := pos[string(record.Key)]
+		var oldPos *data.LogRecordPos
 		if record.Type == data.LogRecordTypeDelete {
-			if ok := wb.db.indexer.Delete(record.Key); !ok {
-				return ErrIndexUpdateFailed
-			}
+			oldPos, _ = wb.db.indexer.Delete(record.Key)
 		} else {
-			if ok := wb.db.indexer.Put(record.Key, logRecordPos); !ok {
-				return ErrIndexUpdateFailed
-			}
+			oldPos, _ = wb.db.indexer.Put(record.Key, logRecordPos)
+		}
+		if oldPos != nil {
+			wb.db.reclaimableSize += int64(oldPos.Size)
 		}
 	}
 	//清空批量数据

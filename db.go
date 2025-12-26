@@ -4,6 +4,7 @@ import (
 	"bitcask-go/data"
 	"bitcask-go/fio"
 	"bitcask-go/index"
+	"bitcask-go/utils"
 	"errors"
 	"fmt"
 	"io"
@@ -36,6 +37,13 @@ type DB struct {
 	isInitial       bool          // 是否是第一次初始化此数据目录
 	filelock        *flock.Flock  // 文件锁
 	bytesWritten    uint          // 已写入但未同步的字节数
+	reclaimableSize int64         //失效的字节数量
+}
+type Stat struct {
+	KeyNum          uint  // key 的数量
+	DataFileNum     uint  // 数据文件的个数
+	ReclaimableSize int64 // 磁盘可回收的空间，字节为单位
+	DiskSize        int64 // 所占磁盘空间的大小
 }
 
 // Close 关闭数据库
@@ -94,6 +102,27 @@ func (db *DB) Sync() error {
 	return db.activeDataFile.Sync()
 }
 
+// Stat 返回数据库的统计信息
+func (db *DB) Stat() *Stat {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	var dataFiles = uint(len(db.olderDataFiles))
+	if db.activeDataFile != nil {
+		dataFiles += 1
+	}
+	dirSize, err := utils.DirSize(db.options.DirPath)
+	if err != nil {
+		panic(err)
+	}
+	return &Stat{
+		KeyNum:          uint(db.indexer.Size()),
+		DataFileNum:     dataFiles,
+		ReclaimableSize: db.reclaimableSize,
+		DiskSize:        dirSize,
+	}
+}
+
 // Open 打开 bitcask 存储引擎实例
 func Open(options Options) (*DB, error) {
 	// 对用户传入的配置项进行校验
@@ -108,6 +137,7 @@ func Open(options Options) (*DB, error) {
 			return nil, err
 		}
 	}
+	fmt.Printf("dirPathbeforeMerge111111111111:%s\n", options.DirPath)
 	//判断当前目录是正在被其他进程使用
 	fileflock := flock.New(filepath.Join(options.DirPath, fileLockName))
 	trylock, err := fileflock.TryLock()
@@ -124,7 +154,7 @@ func Open(options Options) (*DB, error) {
 	if len(entries) == 0 {
 		isInitial = true
 	}
-
+	fmt.Printf("dirPathbeforeMerge221111111111:%s\n", options.DirPath)
 	// 初始化 DB 实例结构体
 	db := &DB{
 		options:        options,
@@ -136,10 +166,13 @@ func Open(options Options) (*DB, error) {
 		bytesWritten:   0,
 	}
 	//加载数据文件之前加载merge数据目录
+	fmt.Printf("dirPathbeforeMerge:%s\n", db.options.DirPath)
 	if err := db.loadMergeFiles(); err != nil {
 		return nil, err
 	}
+	fmt.Printf("dirPathAfterMerge:%s\n", db.options.DirPath)
 	// 加载数据文件
+	//fmt.Printf("开始加载DataFiles\n")
 	if err := db.loadDataFiles(); err != nil {
 		return nil, err
 	}
@@ -187,13 +220,20 @@ func (db *DB) Delete(key []byte) error {
 	if pos, _ := db.indexer.Get(key); pos == nil {
 		return nil
 	}
-	_, err := db.appnedLogRecordWithLock(record)
+	pos, err := db.appnedLogRecordWithLock(record)
 	if err != nil {
 		return err
 	}
-	//更新内存索引
-	if ok := db.indexer.Delete(key); !ok {
+	if pos != nil {
+		db.reclaimableSize += int64(pos.Size)
+	}
+	//从内存索引中将对应的 key 删除
+	oldPos, ok := db.indexer.Delete(key)
+	if !ok {
 		return ErrIndexUpdateFailed
+	}
+	if oldPos != nil {
+		db.reclaimableSize += int64(oldPos.Size)
 	}
 	return nil
 }
@@ -213,10 +253,12 @@ func (db *DB) Put(key []byte, value []byte) error {
 	if err != nil {
 		return err
 	}
-	//更新内存索引
-	if ok := db.indexer.Put(key, LogRecordPos); !ok {
-		return ErrIndexUpdateFailed
+	// 更新内存索引
+	oldPos, _ := db.indexer.Put(key, LogRecordPos)
+	if oldPos != nil {
+		db.reclaimableSize += int64(oldPos.Size)
 	}
+
 	return nil
 }
 func (db *DB) Get(key []byte) ([]byte, error) {
@@ -227,10 +269,12 @@ func (db *DB) Get(key []byte) ([]byte, error) {
 		return nil, ErrKeyIsEmpty
 	}
 	logRecordPos, _ := db.indexer.Get(key)
+	//fmt.Printf("logRecordPos fid:%d", logRecordPos.Fid)
 	//若key不存在则返回错误
 	if logRecordPos == nil {
 		return nil, ErrKeyIsUnfound
 	} // 根据文件 id 找到对应的数据文件
+	fmt.Printf("logRecordPos fid:%d,offset:%d", logRecordPos.Fid, logRecordPos.Offset)
 	return db.getValueByPosition(logRecordPos)
 	// var dataFile *data.DataFile
 	// if db.activeDataFile.Fid == logRecordPos.Fid {
@@ -287,6 +331,7 @@ func (db *DB) Fold(fn func(key []byte, value []byte) bool) error {
 // 根据索引信息获取对应的 value
 func (db *DB) getValueByPosition(logRecordPos *data.LogRecordPos) ([]byte, error) {
 	// 根据文件 id 找到对应的数据文件
+	fmt.Printf("posfid:%d,activefid:%d", logRecordPos.Fid, db.activeDataFile.Fid)
 	var dataFile *data.DataFile
 	if db.activeDataFile.Fid == logRecordPos.Fid {
 		dataFile = db.activeDataFile
@@ -391,6 +436,7 @@ func (db *DB) setActiveDataFile() error {
 
 // 从磁盘中加载数据文件
 func (db *DB) loadDataFiles() error {
+	fmt.Printf("dirPath:%s\n", db.options.DirPath)
 	dirEntries, err := os.ReadDir(db.options.DirPath)
 	if err != nil {
 		return err
@@ -407,6 +453,7 @@ func (db *DB) loadDataFiles() error {
 				return ErrDataDirectoryCorrupted
 			}
 			fileIds = append(fileIds, fileId)
+			fmt.Printf("fileId IN fileIds:%d\n", fileId)
 		}
 	}
 
@@ -428,6 +475,7 @@ func (db *DB) loadDataFiles() error {
 			db.activeDataFile = dataFile
 		} else { // 说明是旧的数据文件
 			db.olderDataFiles[uint32(fid)] = dataFile
+			fmt.Printf("The oldDataFid:%d", fid)
 		}
 	}
 	return nil
@@ -452,7 +500,7 @@ func (db *DB) loadIndexFromDataFiles() error {
 		nonMergeFileId = fid
 	}
 	updateIndex := func(key []byte, Type data.LogRecordType, logRecordPos *data.LogRecordPos) error {
-		var ok bool
+		var oldPos *data.LogRecordPos
 		if Type == data.LogRecordTypeDelete {
 			//NOTE这里由于bitcask是追加写入所以删除操作只是添加了一个删除标记，并没有真正删除数据文件中的数据
 			//所以在加载索引时需要将该key从内存索引中删除
@@ -460,12 +508,15 @@ func (db *DB) loadIndexFromDataFiles() error {
 			//那么数据文件中会有三条记录，k1:v1、k1:delete标记、k1:v2
 			//在加载索引时会先将k1指向v1的位置，然后再将k1从内存索引中删除，最后再将k1指向v2的位置
 			//这样就保证了内存索引中的数据是最新的
-			ok = db.indexer.Delete(key)
+			oldPos, _ = db.indexer.Delete(key)
+			//对于删除的数据来说删除的数据本身也是需要被删除的
+			db.reclaimableSize += int64(logRecordPos.Size)
+			//db.reclaimableSize += int64(oldPos.Size)
 		} else if Type == data.LogRecordTypeNormal {
-			ok = db.indexer.Put(key, logRecordPos)
+			oldPos, _ = db.indexer.Put(key, logRecordPos)
 		}
-		if !ok {
-			return ErrIndexUpdateFailed
+		if oldPos != nil {
+			db.reclaimableSize += int64(oldPos.Size)
 		}
 		return nil
 	}
@@ -474,6 +525,7 @@ func (db *DB) loadIndexFromDataFiles() error {
 	curSeqNum := nonTransaction
 	// 遍历所有的文件id，处理文件中的记录
 	for i, fid := range db.fileIds {
+		fmt.Printf("noMergedFileId:%d fid:%d", nonMergeFileId, fid)
 		//如果发生过merge操作则跳过非merge文件id之前的文件
 		if hasMerge && uint32(fid) < nonMergeFileId {
 			continue
@@ -488,6 +540,7 @@ func (db *DB) loadIndexFromDataFiles() error {
 
 		var offset int64 = 0
 		for {
+			fmt.Printf("load noMergedFile !!!!!!!!!!!!!!!!!!!!!!!!!!!")
 			logRecord, size, err := dataFile.ReadLogRecord(offset)
 
 			if err != nil {
@@ -498,7 +551,7 @@ func (db *DB) loadIndexFromDataFiles() error {
 			}
 			//fmt.Printf("type:%d,keySize:%d,valueSize:%d\n", logRecord.Type, len(logRecord.Key), len(logRecord.Value))
 			// 构造内存索引并保存
-			logRecordPos := &data.LogRecordPos{Fid: fileId, Offset: offset}
+			logRecordPos := &data.LogRecordPos{Fid: fileId, Offset: offset, Size: uint32(size)}
 			realKey, seqNum := parseLogRecordKey(logRecord.Key)
 			fmt.Printf("type:%d,key:%s,seqNum:%d\n", logRecord.Type, string(realKey), seqNum)
 			if seqNum == nonTransaction {
@@ -541,6 +594,9 @@ func checkOptions(options Options) error {
 	}
 	if options.DataFileSizeThreshold <= 0 {
 		return errors.New("database data file size must be greater than 0")
+	}
+	if options.DataFileMergeRatio < 0 || options.DataFileMergeRatio > 1 {
+		return errors.New("dataFileSizeThreshhold must bigger then zero")
 	}
 	return nil
 }

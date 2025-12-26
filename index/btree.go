@@ -24,15 +24,18 @@ func NewBTree(degree int) *BTree {
 }
 
 // BTree插入
-func (bt *BTree) Put(key []byte, record *data.LogRecordPos) bool {
+func (bt *BTree) Put(key []byte, record *data.LogRecordPos) (*data.LogRecordPos, bool) {
 	bt.lock.Lock()
 	defer bt.lock.Unlock()
 	item := &Item{
 		key:   key,
 		value: record,
 	}
-	bt.tree.ReplaceOrInsert(item)
-	return true
+	oldItem := bt.tree.ReplaceOrInsert(item)
+	if oldItem == nil {
+		return nil, false
+	}
+	return oldItem.(*Item).value, true
 }
 
 // Btree查找
@@ -57,7 +60,7 @@ func (bt *BTree) Size() int64 {
 }
 
 // BTree删除
-func (bt *BTree) Delete(key []byte) bool {
+func (bt *BTree) Delete(key []byte) (*data.LogRecordPos, bool) {
 	bt.lock.Lock()
 	defer bt.lock.Unlock()
 	item := &Item{
@@ -65,9 +68,9 @@ func (bt *BTree) Delete(key []byte) bool {
 	}
 	oldItem := bt.tree.Delete(item)
 	if oldItem == nil {
-		return false
+		return nil, false
 	}
-	return true
+	return oldItem.(*Item).value, true
 }
 func (bt *BTree) Iterator(reverse bool) Iterator {
 	if bt.tree == nil {
@@ -80,6 +83,7 @@ func (bt *BTree) Iterator(reverse bool) Iterator {
 func (bt *BTree) Close() error {
 	return nil
 }
+
 // BTree 索引迭代器
 type btreeIterator struct {
 	currIndex int     // 当前遍历的下标位置
@@ -143,4 +147,3 @@ func (it *btreeIterator) Value() *data.LogRecordPos {
 func (it *btreeIterator) Close() {
 	it.values = nil
 }
-
