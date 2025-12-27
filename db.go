@@ -137,7 +137,7 @@ func Open(options Options) (*DB, error) {
 			return nil, err
 		}
 	}
-	fmt.Printf("dirPathbeforeMerge111111111111:%s\n", options.DirPath)
+	//fmt.Printf("dirPathbeforeMerge111111111111:%s\n", options.DirPath)
 	//判断当前目录是正在被其他进程使用
 	fileflock := flock.New(filepath.Join(options.DirPath, fileLockName))
 	trylock, err := fileflock.TryLock()
@@ -154,7 +154,7 @@ func Open(options Options) (*DB, error) {
 	if len(entries) == 0 {
 		isInitial = true
 	}
-	fmt.Printf("dirPathbeforeMerge221111111111:%s\n", options.DirPath)
+	//fmt.Printf("dirPathbeforeMerge221111111111:%s\n", options.DirPath)
 	// 初始化 DB 实例结构体
 	db := &DB{
 		options:        options,
@@ -166,11 +166,11 @@ func Open(options Options) (*DB, error) {
 		bytesWritten:   0,
 	}
 	//加载数据文件之前加载merge数据目录
-	fmt.Printf("dirPathbeforeMerge:%s\n", db.options.DirPath)
+	//fmt.Printf("dirPathbeforeMerge:%s\n", db.options.DirPath)
 	if err := db.loadMergeFiles(); err != nil {
 		return nil, err
 	}
-	fmt.Printf("dirPathAfterMerge:%s\n", db.options.DirPath)
+	//fmt.Printf("dirPathAfterMerge:%s\n", db.options.DirPath)
 	// 加载数据文件
 	//fmt.Printf("开始加载DataFiles\n")
 	if err := db.loadDataFiles(); err != nil {
@@ -436,7 +436,7 @@ func (db *DB) setActiveDataFile() error {
 
 // 从磁盘中加载数据文件
 func (db *DB) loadDataFiles() error {
-	fmt.Printf("dirPath:%s\n", db.options.DirPath)
+	//fmt.Printf("dirPath:%s\n", db.options.DirPath)
 	dirEntries, err := os.ReadDir(db.options.DirPath)
 	if err != nil {
 		return err
@@ -636,4 +636,11 @@ func (db *DB) resetIoType() error {
 		}
 	}
 	return nil
+}
+
+// Backup 备份数据库，将数据文件拷贝到新的目录中
+func (db *DB) Backup(dir string) error {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	return utils.CopyDir(db.options.DirPath, dir, []string{fileLockName})
 }

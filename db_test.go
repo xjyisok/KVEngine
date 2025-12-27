@@ -341,9 +341,26 @@ func TestDB_Stat(t *testing.T) {
 		err := db.Put(utils.GetTestKey(i), utils.RandomValue(1024))
 		assert.Nil(t, err)
 		err = db.Delete(utils.GetTestKey(i))
-		
+
 		assert.Nil(t, err)
 	}
 
 	t.Log(db.Stat())
+}
+func TestDB_copy(t *testing.T) {
+	opts := DefaultOptions
+	dir, _ := os.MkdirTemp("", "bitcask-go-put")
+	opts.DirPath = dir
+	opts.DataFileSizeThreshold = 8 * 1024 * 1024
+	db, err := Open(opts)
+	//defer destroyDB(db)
+	assert.Nil(t, err)
+	assert.NotNil(t, db)
+	//5.写到数据文件进行了转换
+	for i := 0; i < 100000; i++ {
+		err := db.Put(utils.GetTestKey(i), utils.RandomValue(128))
+		assert.Nil(t, err)
+	}
+	backupDir, _ := os.MkdirTemp("", "bitcask-go-backup-test")
+	db.Backup(backupDir)
 }
