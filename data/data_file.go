@@ -114,12 +114,12 @@ func (df *DataFile) ReadLogRecord(offset int64) (*LogRecord, int64, error) {
 	// }
 	logRecordHeader, headerSize := DecodeLogRecordHeader(headerbuf)
 	if logRecordHeader == nil {
-		fmt.Print("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n")
+		//fmt.Print("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n")
 		return nil, 0, io.EOF
 	}
 	//读到文件末尾了
 	if logRecordHeader.KeySize == 0 && logRecordHeader.ValueSize == 0 && logRecordHeader.crc == 0 {
-		fmt.Printf("BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB\n")
+		//fmt.Printf("BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB\n")
 		return nil, 0, io.EOF
 	}
 	// 取出对应的 key 和 value 的长度

@@ -274,7 +274,7 @@ func (db *DB) Get(key []byte) ([]byte, error) {
 	if logRecordPos == nil {
 		return nil, ErrKeyIsUnfound
 	} // 根据文件 id 找到对应的数据文件
-	fmt.Printf("logRecordPos fid:%d,offset:%d", logRecordPos.Fid, logRecordPos.Offset)
+	//fmt.Printf("logRecordPos fid:%d,offset:%d", logRecordPos.Fid, logRecordPos.Offset)
 	return db.getValueByPosition(logRecordPos)
 	// var dataFile *data.DataFile
 	// if db.activeDataFile.Fid == logRecordPos.Fid {
@@ -331,7 +331,7 @@ func (db *DB) Fold(fn func(key []byte, value []byte) bool) error {
 // 根据索引信息获取对应的 value
 func (db *DB) getValueByPosition(logRecordPos *data.LogRecordPos) ([]byte, error) {
 	// 根据文件 id 找到对应的数据文件
-	fmt.Printf("posfid:%d,activefid:%d", logRecordPos.Fid, db.activeDataFile.Fid)
+	//fmt.Printf("posfid:%d,activefid:%d", logRecordPos.Fid, db.activeDataFile.Fid)
 	var dataFile *data.DataFile
 	if db.activeDataFile.Fid == logRecordPos.Fid {
 		dataFile = db.activeDataFile
@@ -540,7 +540,7 @@ func (db *DB) loadIndexFromDataFiles() error {
 
 		var offset int64 = 0
 		for {
-			fmt.Printf("load noMergedFile !!!!!!!!!!!!!!!!!!!!!!!!!!!")
+			//fmt.Printf("load noMergedFile !!!!!!!!!!!!!!!!!!!!!!!!!!!")
 			logRecord, size, err := dataFile.ReadLogRecord(offset)
 
 			if err != nil {
@@ -553,7 +553,7 @@ func (db *DB) loadIndexFromDataFiles() error {
 			// 构造内存索引并保存
 			logRecordPos := &data.LogRecordPos{Fid: fileId, Offset: offset, Size: uint32(size)}
 			realKey, seqNum := parseLogRecordKey(logRecord.Key)
-			fmt.Printf("type:%d,key:%s,seqNum:%d\n", logRecord.Type, string(realKey), seqNum)
+			//fmt.Printf("type:%d,key:%s,seqNum:%d\n", logRecord.Type, string(realKey), seqNum)
 			if seqNum == nonTransaction {
 				//非批量写数据索引构建
 				updateIndex(realKey, logRecord.Type, logRecordPos)
