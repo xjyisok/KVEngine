@@ -2,6 +2,7 @@ package redis
 
 import (
 	bitcaskgo "bitcask-go"
+	"bitcask-go/utils"
 	"encoding/binary"
 	"errors"
 	"time"
@@ -164,43 +165,6 @@ func (rds *RedisDataStructure) HDel(key, field []byte) (bool, error) {
 	}
 	return !exist, nil
 }
-func (rds *RedisDataStructure) findMetadata(key []byte, dataType redisDataType) (*metadata, error) {
-	metaBuf, err := rds.db.Get(key)
-	if err != nil && err != bitcaskgo.ErrKeyIsUnfound {
-		return nil, err
-	}
-
-	var meta *metadata
-	// 元数据不存在，则初始化
-	var exist = true
-	if err == bitcaskgo.ErrKeyIsUnfound {
-		exist = false
-	} else {
-		meta = decodeMetadata(metaBuf)
-		// 存在，判断类型是否匹配
-		if meta.dataType != dataType {
-			return nil, ErrWrongDataType
-		}
-		// 判断是否过期
-		if meta.expire != 0 && meta.expire <= time.Now().UnixNano() {
-			exist = false
-		}
-	}
-
-	if !exist {
-		meta = &metadata{
-			dataType: dataType,
-			expire:   0,
-			version:  time.Now().UnixNano(),
-			size:     0,
-		}
-		if dataType == List {
-			meta.head = initialListMark
-			meta.tail = initialListMark
-		}
-	}
-	return meta, nil
-}
 
 // ======================= Set 数据结构 =======================
 
@@ -289,4 +253,200 @@ func (rds *RedisDataStructure) SRem(key, member []byte) (bool, error) {
 		return false, err
 	}
 	return true, nil
+}
+
+// ======================= List 数据结构 =======================
+func (rds *RedisDataStructure) LPush(key []byte, elements []byte) (uint32, error) {
+	return rds.redisPush(key, elements, true)
+}
+func (rds *RedisDataStructure) RPush(key []byte, elements []byte) (uint32, error) {
+	return rds.redisPush(key, elements, false)
+}
+func (rds *RedisDataStructure) LPop(key []byte) ([]byte, error) {
+	return rds.redisPop(key, true)
+}
+func (rds *RedisDataStructure) RPop(key []byte) ([]byte, error) {
+	return rds.redisPop(key, false)
+}
+func (rds *RedisDataStructure) redisPush(key []byte, element []byte, isLeft bool) (uint32, error) {
+	meta, err := rds.findMetadata(key, List)
+	if err != nil {
+		return 0, err
+	}
+	//构造数据部分key
+	lk := &listInternalKey{
+		key:     key,
+		version: meta.expire,
+	}
+	if isLeft {
+		lk.index = meta.head - 1
+	} else {
+		lk.index = meta.tail
+	}
+	wb := rds.db.NewWriteBatch(bitcaskgo.DefaultWriteBatchOptions)
+	meta.size++
+	if isLeft {
+		meta.head--
+	} else {
+		meta.tail++
+	}
+	_ = wb.Put(key, meta.encode())
+	_ = wb.Put(lk.encode(), element)
+	err = wb.Commit()
+	if err != nil {
+		return 0, err
+	}
+	return meta.size, nil
+}
+func (rds *RedisDataStructure) redisPop(key []byte, isLeft bool) ([]byte, error) {
+	meta, err := rds.findMetadata(key, List)
+	if err != nil {
+		return nil, err
+	}
+	if meta.size == 0 {
+		return nil, nil
+	}
+	lk := &listInternalKey{
+		key:     key,
+		version: meta.expire,
+	}
+	if isLeft {
+		lk.index = meta.head
+	} else {
+		lk.index = meta.tail - 1
+	}
+	element, err := rds.db.Get(lk.encode())
+	if err != nil {
+		return nil, nil
+	}
+	meta.size--
+	if isLeft {
+		meta.head++
+	} else {
+		meta.tail--
+	}
+	wb := rds.db.NewWriteBatch(bitcaskgo.DefaultWriteBatchOptions)
+	_ = wb.Put(key, meta.encode())
+	err = wb.Commit()
+	if err != nil {
+		return nil, err
+	}
+	return element, nil
+}
+
+// ======================= ZSet 数据结构 =======================
+
+func (rds *RedisDataStructure) ZAdd(key []byte, score float64, member []byte) (bool, error) {
+	meta, err := rds.findMetadata(key, ZSet)
+	if err != nil {
+		return false, err
+	}
+
+	// 构造数据部分的key
+	zk := &zsetInternalKey{
+		key:     key,
+		version: meta.version,
+		score:   score,
+		member:  member,
+	}
+
+	var exist = true
+	// 查看是否已经存在
+	value, err := rds.db.Get(zk.encodeWithMember())
+	if err != nil && err != bitcaskgo.ErrKeyIsUnfound {
+		return false, err
+	}
+	if err == bitcaskgo.ErrKeyIsUnfound {
+		exist = false
+	}
+	if exist {
+		if score == utils.FloatFromBytes(value) {
+			return false, nil
+		}
+	}
+
+	// 更新元数据和数据
+	wb := rds.db.NewWriteBatch(bitcaskgo.DefaultWriteBatchOptions)
+	if !exist {
+		meta.size++
+		_ = wb.Put(key, meta.encode())
+	}
+	if exist {
+		oldKey := &zsetInternalKey{
+			key:     key,
+			version: meta.version,
+			member:  member,
+			score:   utils.FloatFromBytes(value),
+		}
+		_ = wb.Delete(oldKey.encodeWithScore())
+	}
+	_ = wb.Put(zk.encodeWithMember(), utils.Float64ToBytes(score))
+	_ = wb.Put(zk.encodeWithScore(), nil)
+	if err = wb.Commit(); err != nil {
+		return false, err
+	}
+
+	return !exist, nil
+}
+
+func (rds *RedisDataStructure) ZScore(key []byte, member []byte) (float64, error) {
+	meta, err := rds.findMetadata(key, ZSet)
+	if err != nil {
+		return -1, err
+	}
+	if meta.size == 0 {
+		return -1, nil
+	}
+
+	// 构造数据部分的key
+	zk := &zsetInternalKey{
+		key:     key,
+		version: meta.version,
+		member:  member,
+	}
+
+	value, err := rds.db.Get(zk.encodeWithMember())
+	if err != nil {
+		return -1, err
+	}
+
+	return utils.FloatFromBytes(value), nil
+}
+
+func (rds *RedisDataStructure) findMetadata(key []byte, dataType redisDataType) (*metadata, error) {
+	metaBuf, err := rds.db.Get(key)
+	if err != nil && err != bitcaskgo.ErrKeyIsUnfound {
+		return nil, err
+	}
+
+	var meta *metadata
+	// 元数据不存在，则初始化
+	var exist = true
+	if err == bitcaskgo.ErrKeyIsUnfound {
+		exist = false
+	} else {
+		meta = decodeMetadata(metaBuf)
+		// 存在，判断类型是否匹配
+		if meta.dataType != dataType {
+			return nil, ErrWrongDataType
+		}
+		// 判断是否过期
+		if meta.expire != 0 && meta.expire <= time.Now().UnixNano() {
+			exist = false
+		}
+	}
+
+	if !exist {
+		meta = &metadata{
+			dataType: dataType,
+			expire:   0,
+			version:  time.Now().UnixNano(),
+			size:     0,
+		}
+		if dataType == List {
+			meta.head = initialListMark
+			meta.tail = initialListMark
+		}
+	}
+	return meta, nil
 }
