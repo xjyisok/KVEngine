@@ -14,7 +14,7 @@ func Test_Redis_String_Set(t *testing.T) {
 	options := bitcaskgo.DefaultOptions
 	dirPath, _ := os.MkdirTemp("", "bitcask-go-redis")
 	options.DirPath = dirPath
-	rds, err := newRedisDataStructure(options)
+	rds, err := NewRedisDataStructure(options)
 	assert.Nil(t, err)
 	err = rds.Set(utils.GetTestKey(1), 0, utils.RandomValue(100))
 	assert.Nil(t, err)
@@ -38,7 +38,7 @@ func Test_Redis_String_Get(t *testing.T) {
 	opts := bitcaskgo.DefaultOptions
 	dir, _ := os.MkdirTemp("", "bitcask-go-redis-del-type")
 	opts.DirPath = dir
-	rds, err := newRedisDataStructure(opts)
+	rds, err := NewRedisDataStructure(opts)
 	assert.Nil(t, err)
 
 	// del
@@ -64,7 +64,7 @@ func TestRedisDataStructure_HGet(t *testing.T) {
 	// dir, _ := os.MkdirTemp("", "bitcask-go-redis-hget")
 	dir := "/tmp/bitcask-go-redis-hget"
 	opts.DirPath = dir
-	rds, err := newRedisDataStructure(opts)
+	rds, err := NewRedisDataStructure(opts)
 	assert.Nil(t, err)
 
 	rds.HSet([]byte("my_hash"), []byte("hash-f1"), []byte("hash-val1"))
@@ -87,7 +87,7 @@ func TestRedisDataStructure_HDel(t *testing.T) {
 	// dir, _ := os.MkdirTemp("", "bitcask-go-redis-hget")
 	dir := "/tmp/bitcask-go-redis-hdel"
 	opts.DirPath = dir
-	rds, err := newRedisDataStructure(opts)
+	rds, err := NewRedisDataStructure(opts)
 	assert.Nil(t, err)
 
 	rds.HSet([]byte("my_hash"), []byte("hash-f1"), []byte("hash-val1"))
@@ -114,7 +114,7 @@ func TestRedisDataStructure_SIsMember(t *testing.T) {
 	opts := bitcaskgo.DefaultOptions
 	dir, _ := os.MkdirTemp("", "bitcask-go-redis-sismember")
 	opts.DirPath = dir
-	rds, err := newRedisDataStructure(opts)
+	rds, err := NewRedisDataStructure(opts)
 	assert.Nil(t, err)
 
 	ok, err := rds.SAdd(utils.GetTestKey(1), []byte("val-1"))
@@ -145,7 +145,7 @@ func TestRedisDataStructure_SRem(t *testing.T) {
 	opts := bitcaskgo.DefaultOptions
 	dir, _ := os.MkdirTemp("", "bitcask-go-redis-srem")
 	opts.DirPath = dir
-	rds, err := newRedisDataStructure(opts)
+	rds, err := NewRedisDataStructure(opts)
 	assert.Nil(t, err)
 
 	ok, err := rds.SAdd(utils.GetTestKey(1), []byte("val-1"))
@@ -173,7 +173,7 @@ func TestRedisDataStructure_LPop(t *testing.T) {
 	opts := bitcaskgo.DefaultOptions
 	dir, _ := os.MkdirTemp("", "bitcask-go-redis-lpop")
 	opts.DirPath = dir
-	rds, err := newRedisDataStructure(opts)
+	rds, err := NewRedisDataStructure(opts)
 	assert.Nil(t, err)
 
 	res, err := rds.LPush(utils.GetTestKey(1), []byte("val-1"))
@@ -201,7 +201,7 @@ func TestRedisDataStructure_RPop(t *testing.T) {
 	opts := bitcaskgo.DefaultOptions
 	dir, _ := os.MkdirTemp("", "bitcask-go-redis-rpop")
 	opts.DirPath = dir
-	rds, err := newRedisDataStructure(opts)
+	rds, err := NewRedisDataStructure(opts)
 	assert.Nil(t, err)
 
 	res, err := rds.RPush(utils.GetTestKey(1), []byte("val-1"))
@@ -228,7 +228,7 @@ func TestRedisDataStructure_ZScore(t *testing.T) {
 	opts := bitcaskgo.DefaultOptions
 	dir, _ := os.MkdirTemp("", "bitcask-go-redis-zset")
 	opts.DirPath = dir
-	rds, err := newRedisDataStructure(opts)
+	rds, err := NewRedisDataStructure(opts)
 	assert.Nil(t, err)
 
 	ok, err := rds.ZAdd(utils.GetTestKey(1), 113, []byte("val-1"))

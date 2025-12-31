@@ -10,6 +10,7 @@ const (
 	maxMetadataSize   = 1 + binary.MaxVarintLen64*2 + binary.MaxVarintLen32
 	extraListMetaSize = binary.MaxVarintLen64 * 2
 	initialListMark   = math.MaxUint64 / 2
+	scorePrefix       = "$%!score$%!"
 )
 
 // 元数据

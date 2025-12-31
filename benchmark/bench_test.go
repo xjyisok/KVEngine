@@ -19,6 +19,7 @@ func init() {
 	dir, _ := os.MkdirTemp("", "bitcask-go-bench")
 	options.DirPath = dir
 	options.IndexType = bitcaskgo.ART
+	options.MMapIsOpen = true
 	db, err = bitcaskgo.Open(options)
 	if err != nil {
 		return
@@ -28,13 +29,13 @@ func Benchmark_Put(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		err := db.Put(utils.GetTestKey(i), utils.RandomValue(1024))
+		err := db.Put(utils.GetTestKey(i), utils.RandomValue(128))
 		assert.Nil(b, err)
 	}
 }
 func Benchmark_Get(b *testing.B) {
 	for i := 0; i < 100000; i++ {
-		err := db.Put(utils.GetTestKey(i), utils.RandomValue(1024))
+		err := db.Put(utils.GetTestKey(i), utils.RandomValue(128))
 		assert.Nil(b, err)
 	}
 	rand.New(rand.NewSource(time.Now().UnixNano()))
@@ -49,7 +50,7 @@ func Benchmark_Get(b *testing.B) {
 }
 func Benchmark_Delete(b *testing.B) {
 	for i := 0; i < 100000; i++ {
-		err := db.Put(utils.GetTestKey(i), utils.RandomValue(1024))
+		err := db.Put(utils.GetTestKey(i), utils.RandomValue(128))
 		assert.Nil(b, err)
 	}
 	rand.New(rand.NewSource(time.Now().UnixNano()))

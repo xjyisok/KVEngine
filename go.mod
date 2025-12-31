@@ -11,6 +11,9 @@ require (
 	github.com/plar/go-adaptive-radix-tree v1.0.7 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/stretchr/testify v1.11.1 // indirect
+	github.com/tidwall/btree v1.1.0 // indirect
+	github.com/tidwall/match v1.1.1 // indirect
+	github.com/tidwall/redcon v1.6.2 // indirect
 	go.etcd.io/bbolt v1.4.3 // indirect
 	golang.org/x/exp v0.0.0-20251219203646-944ab1f22d93 // indirect
 	golang.org/x/sys v0.37.0 // indirect

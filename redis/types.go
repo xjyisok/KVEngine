@@ -5,6 +5,8 @@ import (
 	"bitcask-go/utils"
 	"encoding/binary"
 	"errors"
+	"fmt"
+	"strconv"
 	"time"
 )
 
@@ -26,7 +28,10 @@ const (
 	ZSet
 )
 
-func newRedisDataStructure(options bitcaskgo.Options) (*RedisDataStructure, error) {
+func (rds *RedisDataStructure) Close() error {
+	return rds.db.Close()
+}
+func NewRedisDataStructure(options bitcaskgo.Options) (*RedisDataStructure, error) {
 	db, err := bitcaskgo.Open(options)
 	if err != nil {
 		return nil, err
@@ -50,7 +55,7 @@ func (rds *RedisDataStructure) Set(key []byte, ttl time.Duration, value []byte) 
 	index += binary.PutVarint(buf[index:], expire)
 	recordValue := make([]byte, index+len(value))
 	copy(recordValue[:index], buf[:index])
-	copy(recordValue[index:], buf[index:])
+	copy(recordValue[index:], value)
 	err := rds.db.Put(key, recordValue)
 	if err != nil {
 		return err
@@ -412,7 +417,58 @@ func (rds *RedisDataStructure) ZScore(key []byte, member []byte) (float64, error
 
 	return utils.FloatFromBytes(value), nil
 }
+func (rds *RedisDataStructure) ZRangeByScore(key []byte, min, max float64) ([][]byte, error) {
+	// 先查找对应的元数据信息
+	meta, err := rds.db.Get(key)
+	if err != nil {
+		if err == bitcaskgo.ErrKeyIsUnfound {
+			return nil, nil
+		}
+		return nil, err
+	}
 
+	metaInfo := decodeMetadata(meta)
+	if metaInfo.expire != 0 && metaInfo.expire <= time.Now().UnixNano() {
+		return nil, nil
+	}
+	if metaInfo.size <= 0 {
+		return nil, nil
+	}
+
+	internalKey := &zsetInternalKey{
+		key:     key,
+		version: metaInfo.version,
+		score:   min,
+	}
+
+	options := bitcaskgo.DefaultIteratorOptions
+	options.Prefix = []byte(scorePrefix)
+	iter := rds.db.NewIterator(options)
+	defer iter.Close()
+	var members [][]byte
+	for iter.Seek(internalKey.encodeWithScore()); iter.Valid(); iter.Next() {
+		fmt.Println("key = ", iter.Key())
+		member, err := iter.Value()
+		if err != nil {
+			return nil, err
+		}
+
+		internalKey.member = member
+		scoreBuf, err := rds.db.Get(internalKey.encodeWithMember())
+		if err != nil {
+			return nil, err
+		}
+		score, err := strconv.ParseFloat(string(scoreBuf), 64)
+		if err != nil {
+			return nil, err
+		}
+		if score > max {
+			break
+		}
+		members = append(members, member)
+	}
+	return members, nil
+}
 func (rds *RedisDataStructure) findMetadata(key []byte, dataType redisDataType) (*metadata, error) {
 	metaBuf, err := rds.db.Get(key)
 	if err != nil && err != bitcaskgo.ErrKeyIsUnfound {
