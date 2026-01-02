@@ -4,16 +4,19 @@ import (
 	"bitcask-go/data"
 	"bitcask-go/fio"
 	"bitcask-go/index"
+	bitcaskgo "bitcask-go/lock"
 	"bitcask-go/utils"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/gofrs/flock"
 )
@@ -25,7 +28,10 @@ const (
 
 // 主要实现面向用户的操作接口
 type DB struct {
+	writePaused     atomic.Bool  // 写屏障
+	inFlightWrite   atomic.Int64 // 正在执行的写数量
 	mu              *sync.RWMutex
+	keyLocks        *bitcaskgo.ShardedLock    // 新增，索引分片锁
 	activeDataFile  *data.DataFile            //当前活跃的数据文件
 	olderDataFiles  map[uint32]*data.DataFile //旧的数据文件集合
 	options         Options
@@ -159,6 +165,7 @@ func Open(options Options) (*DB, error) {
 	db := &DB{
 		options:        options,
 		mu:             new(sync.RWMutex),
+		keyLocks:       bitcaskgo.NewShardedLock(256), // 256 个 shard
 		olderDataFiles: make(map[uint32]*data.DataFile),
 		indexer:        index.NewIndexer(options.IndexType, options.DirPath, options.SyncWrites),
 		isInitial:      isInitial,
@@ -207,6 +214,13 @@ func Open(options Options) (*DB, error) {
 }
 
 func (db *DB) Delete(key []byte) error {
+	// 写屏障
+	for db.writePaused.Load() {
+		runtime.Gosched()
+	}
+
+	db.inFlightWrite.Add(1)
+	defer db.inFlightWrite.Add(-1)
 	//如果key为空，返回错误
 	if len(key) == 0 {
 		return ErrKeyIsEmpty
@@ -239,6 +253,13 @@ func (db *DB) Delete(key []byte) error {
 }
 
 func (db *DB) Put(key []byte, value []byte) error {
+	// 写屏障
+	for db.writePaused.Load() {
+		runtime.Gosched()
+	}
+
+	db.inFlightWrite.Add(1)
+	defer db.inFlightWrite.Add(-1)
 	//如果key为空，返回错误
 	if len(key) == 0 {
 		return ErrKeyIsEmpty
@@ -262,8 +283,11 @@ func (db *DB) Put(key []byte, value []byte) error {
 	return nil
 }
 func (db *DB) Get(key []byte) ([]byte, error) {
-	db.mu.RLock()
-	defer db.mu.RUnlock()
+	// db.mu.RLock()
+	// defer db.mu.RUnlock()
+	db.keyLocks.RLock(key)
+	defer db.keyLocks.RUnlock(key)
+	//分片锁优化读取操作
 	//如果key为空，返回错误
 	if len(key) == 0 {
 		return nil, ErrKeyIsEmpty

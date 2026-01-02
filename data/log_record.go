@@ -3,6 +3,7 @@ package data
 import (
 	"encoding/binary"
 	"hash/crc32"
+	"sync"
 )
 
 type LogRecordType = byte
@@ -12,6 +13,17 @@ const (
 	LogRecordTypeDelete   LogRecordType = 1 //删除标记
 	LogRecordTypeBatchEnd LogRecordType = 2 //批量写入标记
 )
+
+var LogRecordBufPool = sync.Pool{
+	New: func() any {
+		return make([]byte, 0, 4*1024)
+	},
+}
+var LogRecordPosPool = sync.Pool{
+	New: func() any {
+		return new(LogRecordPos)
+	},
+}
 
 // const DataFileNameSuffix = ".data"
 
@@ -68,6 +80,33 @@ func EncodeLogRecord(logRecord *LogRecord) ([]byte, int64) {
 	binary.LittleEndian.PutUint32(encBytes[:4], crc)
 	//fmt.Printf("header Length:%d,crc:%d\n", index, crc)
 	return encBytes, int64(size)
+}
+
+// 零 alloc 编码
+func EncodeLogRecordTo(buf []byte, record *LogRecord) ([]byte, int64) {
+	start := len(buf)
+
+	// crc 预留 4 字节
+	buf = append(buf, 0, 0, 0, 0)
+
+	// type
+	buf = append(buf, record.Type)
+
+	// key size
+	buf = binary.AppendVarint(buf, int64(len(record.Key)))
+	// value size
+	buf = binary.AppendVarint(buf, int64(len(record.Value)))
+
+	// key + value
+	buf = append(buf, record.Key...)
+	buf = append(buf, record.Value...)
+
+	// crc（从 Type 开始）
+	crc := crc32.ChecksumIEEE(buf[start+4:])
+	binary.LittleEndian.PutUint32(buf[start:start+4], crc)
+
+	size := int64(len(buf) - start)
+	return buf, size
 }
 func DecodeLogRecordHeader(data []byte) (*LogRecordHeader, int64) {
 	if len(data) <= 4 {

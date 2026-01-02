@@ -25,10 +25,12 @@ type DataFile struct {
 const maxLogRecordHeaderSize = binary.MaxVarintLen32*2 + 1 + 4 //日志记录最大头部大小
 
 const (
-	DataFileNameSuffix    = ".data"
-	HintFileName          = "hint-index"
-	MergeFinishedFileName = "merge-finished"
-	SeqNoFileName         = "seq-no"
+	DataFileNameSuffix        = ".data"
+	HintFileName              = "hint-index"
+	HintFileNameSync          = "hint-index-sync"
+	MergeFinishedFileName     = "merge-finished"
+	MergeFinishedFileNameSync = "mergeSync-finished"
+	SeqNoFileName             = "seq-no"
 )
 
 // 初始化数据文件
@@ -48,8 +50,19 @@ func OpenHintFile(dirPath string) (*DataFile, error) {
 	fileName := filepath.Join(dirPath, HintFileName)
 	return newDataFile(fileName, 0, fio.StandardIO)
 }
+
+// 初始化hint_sync文件
+func OpenHintSyncFile(dirPath string, fid uint32) (*DataFile, error) {
+	fileName := filepath.Join(dirPath, HintFileNameSync) + "_" + fmt.Sprintf("%09d", fid)
+	return newDataFile(fileName, 0, fio.StandardIO)
+}
+
 func OpenMergeFinishedFile(dirPath string) (*DataFile, error) {
 	fileName := filepath.Join(dirPath, MergeFinishedFileName)
+	return newDataFile(fileName, 0, fio.StandardIO)
+}
+func OpenMergeSyncFinishedFile(dirPath string) (*DataFile, error) {
+	fileName := filepath.Join(dirPath, MergeFinishedFileNameSync)
 	return newDataFile(fileName, 0, fio.StandardIO)
 }
 
