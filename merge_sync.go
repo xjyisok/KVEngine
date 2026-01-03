@@ -23,6 +23,8 @@ const (
 )
 
 func (db *DB) Merge_Sync() error {
+	//每次异步merge都将已经merge的字节置零
+	db.mergedByteSize = int64(0)
 	//merge只对oldfile进行merge如果不存在activefile则直接返回
 	if db.activeDataFile == nil {
 		return nil
@@ -103,6 +105,7 @@ func (db *DB) Merge_Sync() error {
 	if err != nil {
 		return err
 	}
+	var mergedByteSize int64
 	for _, file := range mergeFileIds {
 		hintFileSync, err := data.OpenHintSyncFile(mergeSyncPath, file.Fid)
 		if err != nil {
@@ -138,6 +141,8 @@ func (db *DB) Merge_Sync() error {
 				if err := hintFileSync.WriteHintRecord(realKey, hinRecordPos); err != nil {
 					return err
 				}
+			} else {
+				mergedByteSize += int64(logRecordPos.Size)
 			}
 			offset += size
 			//count++
@@ -154,6 +159,7 @@ func (db *DB) Merge_Sync() error {
 			return err
 		}
 	}
+	db.mergedByteSize = mergedByteSize
 	if err := mergeSyncFinFile.Sync(); err != nil {
 		return err
 	}
@@ -411,6 +417,8 @@ func (db *DB) switchIndexAfterMerge(nonMergedSyncFileId uint32) error {
 	}
 	//原子切换文件IO映射
 	db.olderDataFiles = tmpOlderDataFiles
+	//raclaimsize更新
+	db.reclaimableSize -= db.mergedByteSize
 	db.mu.Unlock()
 
 	// 关闭旧索引

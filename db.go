@@ -44,6 +44,7 @@ type DB struct {
 	filelock        *flock.Flock  // 文件锁
 	bytesWritten    uint          // 已写入但未同步的字节数
 	reclaimableSize int64         //失效的字节数量
+	mergedByteSize  int64         //异步merge后减少的字节数量
 }
 type Stat struct {
 	KeyNum          uint  // key 的数量
