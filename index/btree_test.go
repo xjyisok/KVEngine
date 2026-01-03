@@ -8,7 +8,7 @@ import (
 )
 
 func TestBTree_Put(t *testing.T) {
-	bt := NewBTree(32)
+	bt := NewBTree(32, 1000000)
 
 	res1, _ := bt.Put(nil, &data.LogRecordPos{Fid: 1, Offset: 100})
 	assert.Nil(t, res1)
@@ -22,7 +22,7 @@ func TestBTree_Put(t *testing.T) {
 }
 
 func TestBTree_Get(t *testing.T) {
-	bt := NewBTree(32)
+	bt := NewBTree(32, 1000000)
 
 	res1, _ := bt.Put(nil, &data.LogRecordPos{Fid: 1, Offset: 100})
 	assert.Nil(t, res1)
@@ -43,7 +43,7 @@ func TestBTree_Get(t *testing.T) {
 }
 
 func TestBTree_Delete(t *testing.T) {
-	bt := NewBTree(32)
+	bt := NewBTree(32, 1000000)
 	res1, _ := bt.Put(nil, &data.LogRecordPos{Fid: 1, Offset: 100})
 	assert.Nil(t, res1)
 
@@ -61,7 +61,7 @@ func TestBTree_Delete(t *testing.T) {
 }
 
 func TestBTree_Iterator(t *testing.T) {
-	bt1 := NewBTree(32)
+	bt1 := NewBTree(32, 1000000)
 	// 1.BTree 为空的情况
 	iter1 := bt1.Iterator(false)
 	assert.Equal(t, false, iter1.Valid())

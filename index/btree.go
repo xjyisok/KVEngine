@@ -10,16 +10,21 @@ import (
 	"github.com/google/btree"
 )
 
+// TODOLRU缓存
 type BTree struct {
-	tree *btree.BTree
-	lock *sync.RWMutex
+	tree              *btree.BTree
+	lock              *sync.RWMutex
+	nodeCount         int64
+	nodeNumThreshhold int64
 }
 
 // NewBTree 创建一个BTree索引实例
-func NewBTree(degree int) *BTree {
+func NewBTree(degree int, keyNumThreshhold int64) *BTree {
 	return &BTree{
-		tree: btree.New(degree),
-		lock: new(sync.RWMutex),
+		tree:              btree.New(degree),
+		lock:              new(sync.RWMutex),
+		nodeCount:         int64(0),
+		nodeNumThreshhold: keyNumThreshhold,
 	}
 }
 
@@ -33,6 +38,8 @@ func (bt *BTree) Put(key []byte, record *data.LogRecordPos) (*data.LogRecordPos,
 	}
 	oldItem := bt.tree.ReplaceOrInsert(item)
 	if oldItem == nil {
+		//新增加的节点nodeCount+1
+		bt.nodeCount++
 		return nil, false
 	}
 	return oldItem.(*Item).value, true
@@ -70,6 +77,8 @@ func (bt *BTree) Delete(key []byte) (*data.LogRecordPos, bool) {
 	if oldItem == nil {
 		return nil, false
 	}
+	//删除节点nodeCount--
+	bt.nodeCount--
 	return oldItem.(*Item).value, true
 }
 func (bt *BTree) Iterator(reverse bool) Iterator {

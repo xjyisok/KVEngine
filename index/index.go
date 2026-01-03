@@ -37,10 +37,10 @@ type Item struct {
 func (it *Item) Less(bi btree.Item) bool {
 	return bytes.Compare(it.key, bi.(*Item).key) == -1
 }
-func NewIndexer(indexType IndexType, dirPath string, sync bool) Indexer {
+func NewIndexer(indexType IndexType, dirPath string, sync bool, keyNumThreshhold int64) Indexer {
 	switch indexType {
 	case Btree:
-		return NewBTree(32)
+		return NewBTree(32, keyNumThreshhold)
 	case ART:
 		return NewART()
 	case BPlustree:

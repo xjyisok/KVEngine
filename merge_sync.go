@@ -254,7 +254,7 @@ func (db *DB) getNonMergeSyncFileId(dirPath string) (uint32, error) {
 }
 func (db *DB) switchIndexAfterMerge(nonMergedSyncFileId uint32) error {
 	//构建新索引
-	newIndexer := index.NewIndexer(db.options.IndexType, db.options.DirPath, db.options.SyncWrites)
+	newIndexer := index.NewIndexer(db.options.IndexType, db.options.DirPath, db.options.SyncWrites, db.options.keyNumThreshhod)
 	//构建新的数据文件集合
 	tmpOlderDataFiles := make(map[uint32]*data.DataFile)
 	//设置文件IO类型

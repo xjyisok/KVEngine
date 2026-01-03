@@ -168,7 +168,7 @@ func Open(options Options) (*DB, error) {
 		mu:             new(sync.RWMutex),
 		keyLocks:       bitcaskgo.NewShardedLock(256), // 256 个 shard
 		olderDataFiles: make(map[uint32]*data.DataFile),
-		indexer:        index.NewIndexer(options.IndexType, options.DirPath, options.SyncWrites),
+		indexer:        index.NewIndexer(options.IndexType, options.DirPath, options.SyncWrites, options.keyNumThreshhod),
 		isInitial:      isInitial,
 		filelock:       fileflock,
 		bytesWritten:   0,

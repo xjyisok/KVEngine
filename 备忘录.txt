@@ -1,0 +1,2 @@
+//TODO实现LRU缓存，以及coldNode节点持久化到cold-index-hintfilez中
+//根据以上修改merge mergeSync

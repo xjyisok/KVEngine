@@ -13,6 +13,7 @@ type Options struct {
 	BytesPerSync       uint    //每次同步写入的字节数
 	MMapIsOpen         bool    //是否使用内存映射IO
 	DataFileMergeRatio float32 //数据文件merge操作的无效数据merge比例
+	keyNumThreshhod    int64   //内存索引中允许的最大key的数量
 }
 type IndexerType = int8
 
@@ -45,6 +46,7 @@ var DefaultOptions = Options{
 	IndexType:             BTree,
 	BytesPerSync:          0, //默认不启用每隔多少字节同步写入
 	DataFileMergeRatio:    0.5,
+	keyNumThreshhod:       1000000, //默认最多允许100万个key(测试用)
 }
 var DefaultIteratorOptions = IteratorOptions{
 	Prefix:  nil,
