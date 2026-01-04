@@ -23,6 +23,8 @@ const (
 )
 
 func (db *DB) Merge_Sync() error {
+	//启动前判断当前负载是否允许
+	
 	//每次异步merge都将已经merge的字节置零
 	db.mergedByteSize = int64(0)
 	//merge只对oldfile进行merge如果不存在activefile则直接返回
@@ -123,6 +125,54 @@ func (db *DB) Merge_Sync() error {
 			realKey, _ := parseLogRecordKey(logRecord.Key)
 			//查询当前key在原db中的位置
 			logRecordPos, _ := db.indexer.Get(realKey)
+			// //LRU-coldKey------------------------------------------
+			// if logRecordPos == nil {
+			// 	//若indexer中key不存在走coldKeyHintFile
+			// 	//计算key的hash值
+			// 	hashKey := utils.HashKey32Range(realKey, 32)
+			// 	coldKeydf, _ := db.coldKeyHintFile[hashKey]
+			// 	var offset int64 = 0
+			// 	for {
+			// 		logRecord, size, err := coldKeydf.ReadLogRecord(offset)
+			// 		//fmt.Printf("size:%d", size)
+			// 		if err != nil {
+			// 			if err == io.EOF {
+			// 				break
+			// 			}
+			// 			return err
+			// 		}
+			// 		if bytes.Equal(logRecord.Key, realKey) {
+			// 			logRecordPos = data.DecodeLogReordPos(logRecord.Value)
+			// 			break
+			// 		}
+			// 		offset += size
+			// 	}
+			// } // 根据文件 id 找到对应的数据文件
+			// //NOTE:Merge_sync操作只是生成merge后的文件，不需要再更新LRU以及indexer因为merge操作逻辑上并非反映键的使用频率
+			// // evictedKey, _ := db.lru.Put(realKey)
+			// // if evictedKey != nil {
+			// // 	fmt.Printf("evictedKey:%s\n", string(evictedKey))
+			// // 	hashKey := utils.HashKey32Range(evictedKey, 32)
+			// // 	coldKeyHintFile, exists := db.coldKeyHintFile[hashKey]
+			// // 	if !exists {
+			// // 		// 不存在则创建
+			// // 		var err error
+			// // 		coldKeyHintFile, err = data.OpenColdKeyHintFile(
+			// // 			db.options.DirPath,
+			// // 			hashKey,
+			// // 			fio.StandardIO,
+			// // 		)
+			// // 		if err != nil {
+			// // 			return err
+			// // 		}
+			// // 		db.coldKeyHintFile[hashKey] = coldKeyHintFile
+			// // 	}
+			// // 	evictedPos, _ := db.indexer.Get(evictedKey)
+			// // 	coldKeyHintFile.WriteHintRecord(evictedKey, evictedPos)
+			// // 	//删除indexer中被淘汰的key
+			// // 	db.indexer.Delete(evictedKey)
+			// // }
+			// //-----------------------------------------------------
 			if logRecordPos != nil && logRecordPos.Fid == file.Fid && logRecordPos.Offset == offset {
 				//清除事务标记，能持久化到磁盘中的数据肯定已经是一个完整的事务
 				logRecord.Key = logRecordKeyWithSeq(nonTransaction, realKey)
@@ -142,7 +192,9 @@ func (db *DB) Merge_Sync() error {
 					return err
 				}
 			} else {
-				mergedByteSize += int64(logRecordPos.Size)
+				if logRecordPos != nil {
+					mergedByteSize += int64(logRecordPos.Size)
+				}
 			}
 			offset += size
 			//count++

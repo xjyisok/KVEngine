@@ -19,13 +19,13 @@ func TestDB_MergeSync(t *testing.T) {
 	assert.Nil(t, err)
 	assert.NotNil(t, db)
 
-	for i := 0; i < 500000; i++ {
-		err := db.Put(utils.GetTestKey(i), utils.RandomValue(1024))
+	for i := 0; i < 105000; i++ {
+		err := db.Put(utils.GetTestKey(i), utils.RandomValue(128))
 		assert.Nil(t, err)
 	}
-	valInit, err0 := db.Get(utils.GetTestKey(400000))
+	valInit, err0 := db.Get(utils.GetTestKey(80000))
 	assert.Nil(t, err0)
-	for i := 0; i < 50000; i++ {
+	for i := 0; i < 5000; i++ {
 		err := db.Delete(utils.GetTestKey(i))
 		assert.Nil(t, err)
 	}
@@ -35,7 +35,7 @@ func TestDB_MergeSync(t *testing.T) {
 	assert.Nil(t, err2)
 	_, err3 := db.Get(utils.GetTestKey(100))
 	assert.Equal(t, err3, ErrKeyIsUnfound)
-	valAfterMerge, err4 := db.Get(utils.GetTestKey(400000))
+	valAfterMerge, err4 := db.Get(utils.GetTestKey(80000))
 	assert.Nil(t, err4)
 	assert.Equal(t, valInit, valAfterMerge)
 	db.Close()

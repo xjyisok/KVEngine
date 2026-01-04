@@ -18,6 +18,7 @@ type BPlusTree struct {
 }
 
 // NewBPlusTree 打开一个 B+ 树实例
+// TODO用磁盘B+树做coldKey兜底，在coldKeyHintFile上再加一层映射防止已经delete的key由于存在历史evicted又被Get
 func NewBPlusTree(dirPath string, sync bool) *BPlusTree {
 	// 打开 bbolt 实例
 	opts := bbolt.DefaultOptions

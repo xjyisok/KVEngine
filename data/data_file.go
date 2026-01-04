@@ -31,6 +31,7 @@ const (
 	MergeFinishedFileName     = "merge-finished"
 	MergeFinishedFileNameSync = "mergeSync-finished"
 	SeqNoFileName             = "seq-no"
+	ColdKeyHintFileName       = "coldkey-hint"
 )
 
 // 初始化数据文件
@@ -40,9 +41,20 @@ func OpenDataFile(dirPath string, fid uint32, ioType fio.IOType) (*DataFile, err
 	return newDataFile(fileName, fid, ioType)
 }
 
+// 创建coldKey存储文件，以key的hash值为索引
+func OpenColdKeyHintFile(dirPath string, hash uint32, ioType fio.IOType) (*DataFile, error) {
+	fileName := GetColdKeyName(dirPath, hash)
+	return newDataFile(fileName, hash, ioType)
+}
+
 // 获取文件名
 func GetDataFileName(dirPath string, fileId uint32) string {
 	return filepath.Join(dirPath, fmt.Sprintf("%09d", fileId)+DataFileNameSuffix)
+}
+
+// 获取cold key文件名
+func GetColdKeyName(dirPath string, hash uint32) string {
+	return filepath.Join(dirPath, fmt.Sprintf("%09d", hash)+ColdKeyHintFileName)
 }
 
 // 初始化hint文件

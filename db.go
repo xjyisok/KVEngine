@@ -1,11 +1,13 @@
 package bitcaskgo
 
 import (
+	lru "bitcask-go/LRU"
 	"bitcask-go/data"
 	"bitcask-go/fio"
 	"bitcask-go/index"
 	bitcaskgo "bitcask-go/lock"
 	"bitcask-go/utils"
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -28,12 +30,14 @@ const (
 
 // 主要实现面向用户的操作接口
 type DB struct {
+	lru             *lru.LRU
 	writePaused     atomic.Bool  // 写屏障
 	inFlightWrite   atomic.Int64 // 正在执行的写数量
 	mu              *sync.RWMutex
 	keyLocks        *bitcaskgo.ShardedLock    // 新增，索引分片锁
 	activeDataFile  *data.DataFile            //当前活跃的数据文件
 	olderDataFiles  map[uint32]*data.DataFile //旧的数据文件集合
+	coldKeyHintFile map[uint32]*data.DataFile //coldkey的索引文件集合
 	options         Options
 	indexer         index.Indexer //内存索引
 	fileIds         []int         // 文件 id，只能在加载索引的时候使用，不能在其他的地方更新和使用
@@ -91,6 +95,12 @@ func (db *DB) Close() error {
 		}
 	}
 	if err := db.indexer.Close(); err != nil {
+		return err
+	}
+	//释放lru
+	db.lru.Clear()
+	//删除coldKey hintfile
+	if err := db.DeleteColdKeyHintFile(); err != nil {
 		return err
 	}
 	//释放文件锁
@@ -164,14 +174,16 @@ func Open(options Options) (*DB, error) {
 	//fmt.Printf("dirPathbeforeMerge221111111111:%s\n", options.DirPath)
 	// 初始化 DB 实例结构体
 	db := &DB{
-		options:        options,
-		mu:             new(sync.RWMutex),
-		keyLocks:       bitcaskgo.NewShardedLock(256), // 256 个 shard
-		olderDataFiles: make(map[uint32]*data.DataFile),
-		indexer:        index.NewIndexer(options.IndexType, options.DirPath, options.SyncWrites, options.keyNumThreshhod),
-		isInitial:      isInitial,
-		filelock:       fileflock,
-		bytesWritten:   0,
+		lru:             lru.NewLRU(int(options.keyNumThreshhod)),
+		options:         options,
+		mu:              new(sync.RWMutex),
+		keyLocks:        bitcaskgo.NewShardedLock(256), // 256 个 shard
+		olderDataFiles:  make(map[uint32]*data.DataFile),
+		coldKeyHintFile: make(map[uint32]*data.DataFile),
+		indexer:         index.NewIndexer(options.IndexType, options.DirPath, options.SyncWrites, options.keyNumThreshhod),
+		isInitial:       isInitial,
+		filelock:        fileflock,
+		bytesWritten:    0,
 	}
 	//加载数据文件之前加载merge数据目录
 	//fmt.Printf("dirPathbeforeMerge:%s\n", db.options.DirPath)
@@ -250,6 +262,8 @@ func (db *DB) Delete(key []byte) error {
 	if oldPos != nil {
 		db.reclaimableSize += int64(oldPos.Size)
 	}
+	db.lru.Delete(key)
+
 	return nil
 }
 
@@ -280,7 +294,30 @@ func (db *DB) Put(key []byte, value []byte) error {
 	if oldPos != nil {
 		db.reclaimableSize += int64(oldPos.Size)
 	}
-
+	//TODO:将被淘汰的coldkey写入到coldKeyHintfile中
+	evictedKey, _ := db.lru.Put(key)
+	if evictedKey != nil {
+		fmt.Printf("evictedKey:%s\n", string(evictedKey))
+		hashKey := utils.HashKey32Range(evictedKey, 32)
+		coldKeyHintFile, exists := db.coldKeyHintFile[hashKey]
+		if !exists {
+			// 不存在则创建
+			var err error
+			coldKeyHintFile, err = data.OpenColdKeyHintFile(
+				db.options.DirPath,
+				hashKey,
+				fio.StandardIO,
+			)
+			if err != nil {
+				return err
+			}
+			db.coldKeyHintFile[hashKey] = coldKeyHintFile
+		}
+		evictedPos, _ := db.indexer.Get(evictedKey)
+		coldKeyHintFile.WriteHintRecord(evictedKey, evictedPos)
+		//删除indexer中被淘汰的key
+		db.indexer.Delete(evictedKey)
+	}
 	return nil
 }
 func (db *DB) Get(key []byte) ([]byte, error) {
@@ -295,11 +332,52 @@ func (db *DB) Get(key []byte) ([]byte, error) {
 	}
 	logRecordPos, _ := db.indexer.Get(key)
 	//fmt.Printf("logRecordPos fid:%d", logRecordPos.Fid)
-	//若key不存在则返回错误
 	if logRecordPos == nil {
-		return nil, ErrKeyIsUnfound
+		//若indexer中key不存在走coldKeyHintFile
+		//计算key的hash值
+		hashKey := utils.HashKey32Range(key, 32)
+		coldKeydf, _ := db.coldKeyHintFile[hashKey]
+		var offset int64 = 0
+		for {
+			logRecord, size, err := coldKeydf.ReadLogRecord(offset)
+			//fmt.Printf("size:%d", size)
+			if err != nil {
+				if err == io.EOF {
+					break
+				}
+				return nil, err
+			}
+			if bytes.Equal(logRecord.Key, key) {
+				logRecordPos = data.DecodeLogReordPos(logRecord.Value)
+				break
+			}
+			offset += size
+		}
 	} // 根据文件 id 找到对应的数据文件
 	//fmt.Printf("logRecordPos fid:%d,offset:%d", logRecordPos.Fid, logRecordPos.Offset)
+	evictedKey, _ := db.lru.Put(key)
+	if evictedKey != nil {
+		fmt.Printf("evictedKey:%s\n", string(evictedKey))
+		hashKey := utils.HashKey32Range(evictedKey, 32)
+		coldKeyHintFile, exists := db.coldKeyHintFile[hashKey]
+		if !exists {
+			// 不存在则创建
+			var err error
+			coldKeyHintFile, err = data.OpenColdKeyHintFile(
+				db.options.DirPath,
+				hashKey,
+				fio.StandardIO,
+			)
+			if err != nil {
+				return nil, err
+			}
+			db.coldKeyHintFile[hashKey] = coldKeyHintFile
+		}
+		evictedPos, _ := db.indexer.Get(evictedKey)
+		coldKeyHintFile.WriteHintRecord(evictedKey, evictedPos)
+		//删除indexer中被淘汰的key
+		db.indexer.Delete(evictedKey)
+	}
 	return db.getValueByPosition(logRecordPos)
 	// var dataFile *data.DataFile
 	// if db.activeDataFile.Fid == logRecordPos.Fid {
@@ -668,4 +746,22 @@ func (db *DB) Backup(dir string) error {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 	return utils.CopyDir(db.options.DirPath, dir, []string{fileLockName})
+}
+
+// 删除coldKey的hintfile
+func (db *DB) DeleteColdKeyHintFile() error {
+	dirEntries, err := os.ReadDir(db.options.DirPath)
+	if err != nil {
+		return err
+	}
+	// 遍历目录中的所有文件，找到所有以 .ColdKeyHintFileName结尾的文件
+	for _, entry := range dirEntries {
+		if strings.HasSuffix(entry.Name(), data.ColdKeyHintFileName) {
+			err = os.Remove(filepath.Join(db.options.DirPath, entry.Name()))
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }

@@ -46,7 +46,7 @@ var DefaultOptions = Options{
 	IndexType:             BTree,
 	BytesPerSync:          0, //默认不启用每隔多少字节同步写入
 	DataFileMergeRatio:    0.5,
-	keyNumThreshhod:       1000000, //默认最多允许100万个key(测试用)
+	keyNumThreshhod:       100000, //默认最多允许10万个key(测试用)
 }
 var DefaultIteratorOptions = IteratorOptions{
 	Prefix:  nil,
