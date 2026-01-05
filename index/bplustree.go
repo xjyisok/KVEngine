@@ -3,6 +3,7 @@ package index
 import (
 	"bitcask-go/data"
 	"path/filepath"
+	"strconv"
 
 	"go.etcd.io/bbolt"
 )
@@ -19,11 +20,11 @@ type BPlusTree struct {
 
 // NewBPlusTree 打开一个 B+ 树实例
 // TODO用磁盘B+树做coldKey兜底，在coldKeyHintFile上再加一层映射防止已经delete的key由于存在历史evicted又被Get
-func NewBPlusTree(dirPath string, sync bool) *BPlusTree {
+func NewBPlusTree(dirPath string, sync bool, epocNum int64) *BPlusTree {
 	// 打开 bbolt 实例
 	opts := bbolt.DefaultOptions
 	opts.NoSync = !sync
-	bptree, err := bbolt.Open(filepath.Join(dirPath, indexFileName), 0644, opts)
+	bptree, err := bbolt.Open(filepath.Join(dirPath, indexFileName+strconv.Itoa(int(epocNum))), 0644, opts)
 	if err != nil {
 		panic("failed to open bptree at startup")
 	}

@@ -44,7 +44,7 @@ func NewIndexer(indexType IndexType, dirPath string, sync bool, keyNumThreshhold
 	case ART:
 		return NewART()
 	case BPlustree:
-		return NewBPlusTree(dirPath, sync)
+		return NewBPlusTree(dirPath, sync, 0)
 	default:
 		panic("unsupported index type")
 	}

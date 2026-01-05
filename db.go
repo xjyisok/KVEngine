@@ -7,7 +7,6 @@ import (
 	"bitcask-go/index"
 	bitcaskgo "bitcask-go/lock"
 	"bitcask-go/utils"
-	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -30,25 +29,27 @@ const (
 
 // 主要实现面向用户的操作接口
 type DB struct {
-	lru             *lru.LRU
-	writePaused     atomic.Bool  // 写屏障
-	inFlightWrite   atomic.Int64 // 正在执行的写数量
-	mu              *sync.RWMutex
-	keyLocks        *bitcaskgo.ShardedLock    // 新增，索引分片锁
-	activeDataFile  *data.DataFile            //当前活跃的数据文件
-	olderDataFiles  map[uint32]*data.DataFile //旧的数据文件集合
-	coldKeyHintFile map[uint32]*data.DataFile //coldkey的索引文件集合
-	options         Options
-	indexer         index.Indexer //内存索引
-	fileIds         []int         // 文件 id，只能在加载索引的时候使用，不能在其他的地方更新和使用
-	seqNum          uint64        //全局事务序列号
-	isMerging       bool          //是否正在进行merge操作的标记，0表示没有，1表示正在进行
-	seqNoFileExists bool          // 存储事务序列号的文件是否存在isSeq
-	isInitial       bool          // 是否是第一次初始化此数据目录
-	filelock        *flock.Flock  // 文件锁
-	bytesWritten    uint          // 已写入但未同步的字节数
-	reclaimableSize int64         //失效的字节数量
-	mergedByteSize  int64         //异步merge后减少的字节数量
+	lru            *lru.LRU
+	writePaused    atomic.Bool  // 写屏障
+	inFlightWrite  atomic.Int64 // 正在执行的写数量
+	mu             *sync.RWMutex
+	keyLocks       *bitcaskgo.ShardedLock    // 新增，索引分片锁
+	activeDataFile *data.DataFile            //当前活跃的数据文件
+	olderDataFiles map[uint32]*data.DataFile //旧的数据文件集合
+	//coldKeyHintFile map[uint32]*data.DataFile //coldkey的索引文件集合
+	options             Options
+	indexer             index.Indexer //内存索引
+	coldKeyIndexer      index.Indexer //用来保存被lru淘汰的key的索引信息
+	fileIds             []int         // 文件 id，只能在加载索引的时候使用，不能在其他的地方更新和使用
+	seqNum              uint64        //全局事务序列号
+	isMerging           bool          //是否正在进行merge操作的标记，0表示没有，1表示正在进行
+	seqNoFileExists     bool          // 存储事务序列号的文件是否存在isSeq
+	isInitial           bool          // 是否是第一次初始化此数据目录
+	filelock            *flock.Flock  // 文件锁
+	bytesWritten        uint          // 已写入但未同步的字节数
+	reclaimableSize     int64         //失效的字节数量
+	mergedByteSize      int64         //异步merge后减少的字节数量
+	curColdIndexFileNum int64         //当前coldIndexFile的序号，merge_sync中会改变
 }
 type Stat struct {
 	KeyNum          uint  // key 的数量
@@ -99,8 +100,8 @@ func (db *DB) Close() error {
 	}
 	//释放lru
 	db.lru.Clear()
-	//删除coldKey hintfile
-	if err := db.DeleteColdKeyHintFile(); err != nil {
+	//删除BplusTree的coldKey索引文件
+	if err := db.DeleteBplusColdKeyIndexFile(); err != nil {
 		return err
 	}
 	//释放文件锁
@@ -174,16 +175,22 @@ func Open(options Options) (*DB, error) {
 	//fmt.Printf("dirPathbeforeMerge221111111111:%s\n", options.DirPath)
 	// 初始化 DB 实例结构体
 	db := &DB{
-		lru:             lru.NewLRU(int(options.keyNumThreshhod)),
-		options:         options,
-		mu:              new(sync.RWMutex),
-		keyLocks:        bitcaskgo.NewShardedLock(256), // 256 个 shard
-		olderDataFiles:  make(map[uint32]*data.DataFile),
-		coldKeyHintFile: make(map[uint32]*data.DataFile),
-		indexer:         index.NewIndexer(options.IndexType, options.DirPath, options.SyncWrites, options.keyNumThreshhod),
-		isInitial:       isInitial,
-		filelock:        fileflock,
-		bytesWritten:    0,
+		lru:            lru.NewLRU(int(options.keyNumThreshhod)),
+		options:        options,
+		mu:             new(sync.RWMutex),
+		keyLocks:       bitcaskgo.NewShardedLock(256), // 256 个 shard
+		olderDataFiles: make(map[uint32]*data.DataFile),
+		//coldKeyHintFile: make(map[uint32]*data.DataFile),
+		coldKeyIndexer:      index.NewBPlusTree(options.DirPath, options.SyncWrites, 0),
+		indexer:             index.NewIndexer(options.IndexType, options.DirPath, options.SyncWrites, options.keyNumThreshhod),
+		isInitial:           isInitial,
+		filelock:            fileflock,
+		bytesWritten:        0,
+		curColdIndexFileNum: 0,
+	}
+	//删除可能的历史遗留coldKeyFile
+	if err := db.DeleteBplusColdKeyIndexFile(); err != nil {
+		return nil, err
 	}
 	//加载数据文件之前加载merge数据目录
 	//fmt.Printf("dirPathbeforeMerge:%s\n", db.options.DirPath)
@@ -226,47 +233,98 @@ func Open(options Options) (*DB, error) {
 	return db, nil
 }
 
+// func (db *DB) Delete(key []byte) error {
+// 	// 写屏障
+// 	for db.writePaused.Load() {
+// 		runtime.Gosched()
+// 	}
+
+// 	db.inFlightWrite.Add(1)
+// 	defer db.inFlightWrite.Add(-1)
+// 	//如果key为空，返回错误
+// 	if len(key) == 0 {
+// 		return ErrKeyIsEmpty
+// 	}
+// 	//构造logRecord结构体
+// 	record := &data.LogRecord{
+// 		Key:   logRecordKeyWithSeq(nonTransaction, key),
+// 		Value: nil,
+// 		Type:  data.LogRecordTypeDelete, //删除标记
+// 	}
+// 	// 尝试从内存索引删除
+// 	pos, _ := db.indexer.Get(key)
+// 	if pos == nil {
+// 		// 如果内存索引没有，再从 coldKeyIndexer 删除
+// 		pos, _ = db.coldKeyIndexer.Get(key)
+// 		if pos == nil {
+// 			return nil
+// 		}
+// 	}
+
+// 	pos, err := db.appnedLogRecordWithLock(record)
+// 	if err != nil {
+// 		return err
+// 	}
+// 	if pos != nil {
+// 		db.reclaimableSize += int64(pos.Size)
+// 	}
+// 	//从内存索引中将对应的 key 删除
+// 	oldPos, ok := db.indexer.Delete(key)
+// 	if !ok {
+// 		return ErrIndexUpdateFailed
+// 	}
+// 	if oldPos != nil {
+// 		db.reclaimableSize += int64(oldPos.Size)
+// 	}
+// 	//在Bplus的coldKeyindex中删除对应的key
+// 	db.coldKeyIndexer.Delete(key)
+// 	db.lru.Delete(key)
+
+// 	return nil
+// }
 func (db *DB) Delete(key []byte) error {
-	// 写屏障
-	for db.writePaused.Load() {
-		runtime.Gosched()
-	}
+    for db.writePaused.Load() {
+        runtime.Gosched()
+    }
 
-	db.inFlightWrite.Add(1)
-	defer db.inFlightWrite.Add(-1)
-	//如果key为空，返回错误
-	if len(key) == 0 {
-		return ErrKeyIsEmpty
-	}
-	//构造logRecord结构体
-	record := &data.LogRecord{
-		Key:   logRecordKeyWithSeq(nonTransaction, key),
-		Value: nil,
-		Type:  data.LogRecordTypeDelete, //删除标记
-	}
-	if pos, _ := db.indexer.Get(key); pos == nil {
-		return nil
-	}
-	pos, err := db.appnedLogRecordWithLock(record)
-	if err != nil {
-		return err
-	}
-	if pos != nil {
-		db.reclaimableSize += int64(pos.Size)
-	}
-	//从内存索引中将对应的 key 删除
-	oldPos, ok := db.indexer.Delete(key)
-	if !ok {
-		return ErrIndexUpdateFailed
-	}
-	if oldPos != nil {
-		db.reclaimableSize += int64(oldPos.Size)
-	}
-	db.lru.Delete(key)
+    db.inFlightWrite.Add(1)
+    defer db.inFlightWrite.Add(-1)
 
-	return nil
+    if len(key) == 0 {
+        return ErrKeyIsEmpty
+    }
+
+    // 尝试从内存索引删除
+    pos, _ := db.indexer.Get(key)
+    if pos == nil {
+        // 如果内存索引没有，再从 coldKeyIndexer 删除
+        pos, _ = db.coldKeyIndexer.Get(key)
+        if pos == nil {
+            return ErrKeyIsUnfound
+        }
+    }
+
+    // 构造删除记录
+    record := &data.LogRecord{
+        Key:   logRecordKeyWithSeq(nonTransaction, key),
+        Value: nil,
+        Type:  data.LogRecordTypeDelete,
+    }
+    logPos, err := db.appnedLogRecordWithLock(record)
+    if err != nil {
+        return err
+    }
+    if logPos != nil {
+        db.reclaimableSize += int64(logPos.Size)
+    }
+
+    // 删除内存索引和冷索引
+    db.indexer.Delete(key)
+    db.coldKeyIndexer.Delete(key)
+    db.lru.Delete(key)
+
+    return nil
 }
-
 func (db *DB) Put(key []byte, value []byte) error {
 	// 写屏障
 	for db.writePaused.Load() {
@@ -297,25 +355,29 @@ func (db *DB) Put(key []byte, value []byte) error {
 	//TODO:将被淘汰的coldkey写入到coldKeyHintfile中
 	evictedKey, _ := db.lru.Put(key)
 	if evictedKey != nil {
-		fmt.Printf("evictedKey:%s\n", string(evictedKey))
-		hashKey := utils.HashKey32Range(evictedKey, 32)
-		coldKeyHintFile, exists := db.coldKeyHintFile[hashKey]
-		if !exists {
-			// 不存在则创建
-			var err error
-			coldKeyHintFile, err = data.OpenColdKeyHintFile(
-				db.options.DirPath,
-				hashKey,
-				fio.StandardIO,
-			)
-			if err != nil {
-				return err
-			}
-			db.coldKeyHintFile[hashKey] = coldKeyHintFile
-		}
+		//fmt.Printf("evictedKey:%s\n", string(evictedKey))
+		// hashKey := utils.HashKey32Range(evictedKey, 32)
+		// coldKeyHintFile, exists := db.coldKeyHintFile[hashKey]
+		// if !exists {
+		// 	// 不存在则创建
+		// 	var err error
+		// 	coldKeyHintFile, err = data.OpenColdKeyHintFile(
+		// 		db.options.DirPath,
+		// 		hashKey,
+		// 		fio.StandardIO,
+		// 	)
+		// 	if err != nil {
+		// 		return err
+		// 	}
+		// 	db.coldKeyHintFile[hashKey] = coldKeyHintFile
+		// }
 		evictedPos, _ := db.indexer.Get(evictedKey)
-		coldKeyHintFile.WriteHintRecord(evictedKey, evictedPos)
-		//删除indexer中被淘汰的key
+		// coldKeyHintFile.WriteHintRecord(evictedKey, evictedPos)
+		// //删除indexer中被淘汰的key
+		//BplusTree存储LRU淘汰的key
+		db.coldKeyIndexer.Put(evictedKey, evictedPos)
+		//BplusTree删除key防止key的历史Put干扰
+		db.coldKeyIndexer.Delete(key)
 		db.indexer.Delete(evictedKey)
 	}
 	return nil
@@ -333,50 +395,68 @@ func (db *DB) Get(key []byte) ([]byte, error) {
 	logRecordPos, _ := db.indexer.Get(key)
 	//fmt.Printf("logRecordPos fid:%d", logRecordPos.Fid)
 	if logRecordPos == nil {
-		//若indexer中key不存在走coldKeyHintFile
-		//计算key的hash值
-		hashKey := utils.HashKey32Range(key, 32)
-		coldKeydf, _ := db.coldKeyHintFile[hashKey]
-		var offset int64 = 0
-		for {
-			logRecord, size, err := coldKeydf.ReadLogRecord(offset)
-			//fmt.Printf("size:%d", size)
-			if err != nil {
-				if err == io.EOF {
-					break
-				}
-				return nil, err
+		//如果不存在就查BplusTree
+		logRecordPos, _ = db.coldKeyIndexer.Get(key)
+		if logRecordPos == nil {
+			return nil, ErrKeyIsUnfound
+		} else {
+			//内存索引添加Get的key
+			db.indexer.Put(key, logRecordPos)
+			evictedKey, _ := db.lru.Put(key)
+			if evictedKey != nil {
+				//1.获取被淘汰的key的pos
+				evictedPos, _ := db.indexer.Get(evictedKey)
+				//BplusTree中加入被淘汰的key
+				db.coldKeyIndexer.Put(evictedKey, evictedPos)
+				//BplusTree中删除key的历史记录
+				db.coldKeyIndexer.Delete(key)
+				//内存索引删除被淘汰的key
+				db.indexer.Delete(evictedKey)
+
 			}
-			if bytes.Equal(logRecord.Key, key) {
-				logRecordPos = data.DecodeLogReordPos(logRecord.Value)
-				break
-			}
-			offset += size
-		}
-	} // 根据文件 id 找到对应的数据文件
-	//fmt.Printf("logRecordPos fid:%d,offset:%d", logRecordPos.Fid, logRecordPos.Offset)
-	evictedKey, _ := db.lru.Put(key)
-	if evictedKey != nil {
-		fmt.Printf("evictedKey:%s\n", string(evictedKey))
-		hashKey := utils.HashKey32Range(evictedKey, 32)
-		coldKeyHintFile, exists := db.coldKeyHintFile[hashKey]
-		if !exists {
-			// 不存在则创建
-			var err error
-			coldKeyHintFile, err = data.OpenColdKeyHintFile(
-				db.options.DirPath,
-				hashKey,
-				fio.StandardIO,
-			)
-			if err != nil {
-				return nil, err
-			}
-			db.coldKeyHintFile[hashKey] = coldKeyHintFile
-		}
-		evictedPos, _ := db.indexer.Get(evictedKey)
-		coldKeyHintFile.WriteHintRecord(evictedKey, evictedPos)
-		//删除indexer中被淘汰的key
-		db.indexer.Delete(evictedKey)
+			//若indexer中key不存在走coldKeyHintFile
+			//计算key的hash值
+			// hashKey := utils.HashKey32Range(key, 32)
+			// coldKeydf, _ := db.coldKeyHintFile[hashKey]
+			// var offset int64 = 0
+			// for {
+			// 	logRecord, size, err := coldKeydf.ReadLogRecord(offset)
+			// 	//fmt.Printf("size:%d", size)
+			// 	if err != nil {
+			// 		if err == io.EOF {
+			// 			break
+			// 		}
+			// 		return nil, err
+			// 	}
+			// 	if bytes.Equal(logRecord.Key, key) {
+			// 		logRecordPos = data.DecodeLogReordPos(logRecord.Value)
+			// 		break
+			// 	}
+			// 	offset += size
+			// }
+		} // 根据文件 id 找到对应的数据文件
+		//fmt.Printf("logRecordPos fid:%d,offset:%d", logRecordPos.Fid, logRecordPos.Offset)
+
+		// fmt.Printf("evictedKey:%s\n", string(evictedKey))
+		// hashKey := utils.HashKey32Range(evictedKey, 32)
+		// coldKeyHintFile, exists := db.coldKeyHintFile[hashKey]
+		// if !exists {
+		// 	// 不存在则创建
+		// 	var err error
+		// 	coldKeyHintFile, err = data.OpenColdKeyHintFile(
+		// 		db.options.DirPath,
+		// 		hashKey,
+		// 		fio.StandardIO,
+		// 	)
+		// 	if err != nil {
+		// 		return nil, err
+		// 	}
+		// 	db.coldKeyHintFile[hashKey] = coldKeyHintFile
+		// }
+		// evictedPos, _ := db.indexer.Get(evictedKey)
+		// coldKeyHintFile.WriteHintRecord(evictedKey, evictedPos)
+		// //删除indexer中被淘汰的key
+		// db.indexer.Delete(evictedKey)
 	}
 	return db.getValueByPosition(logRecordPos)
 	// var dataFile *data.DataFile
@@ -757,6 +837,24 @@ func (db *DB) DeleteColdKeyHintFile() error {
 	// 遍历目录中的所有文件，找到所有以 .ColdKeyHintFileName结尾的文件
 	for _, entry := range dirEntries {
 		if strings.HasSuffix(entry.Name(), data.ColdKeyHintFileName) {
+			err = os.Remove(filepath.Join(db.options.DirPath, entry.Name()))
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// 删除Bplus的内存索引文件
+func (db *DB) DeleteBplusColdKeyIndexFile() error {
+	dirEntries, err := os.ReadDir(db.options.DirPath)
+	if err != nil {
+		return err
+	}
+	// 遍历目录中的所有文件，找到所有以 .ColdKeyHintFileName结尾的文件
+	for _, entry := range dirEntries {
+		if strings.HasSuffix(entry.Name(), "bptree-index") {
 			err = os.Remove(filepath.Join(db.options.DirPath, entry.Name()))
 			if err != nil {
 				return err

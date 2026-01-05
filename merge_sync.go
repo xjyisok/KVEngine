@@ -1,6 +1,7 @@
 package bitcaskgo
 
 import (
+	lru "bitcask-go/LRU"
 	"bitcask-go/data"
 	"bitcask-go/fio"
 	"bitcask-go/index"
@@ -20,11 +21,12 @@ const (
 	mergeSyncDirName     = "-mergeSync"
 	mergeSyncFinishedKey = "mergeSync.finished"
 	mergeTmpFolder       = "mergefolder"
+	indexFileName        = "bptree-index"
 )
 
 func (db *DB) Merge_Sync() error {
 	//启动前判断当前负载是否允许
-	
+
 	//每次异步merge都将已经merge的字节置零
 	db.mergedByteSize = int64(0)
 	//merge只对oldfile进行merge如果不存在activefile则直接返回
@@ -125,54 +127,13 @@ func (db *DB) Merge_Sync() error {
 			realKey, _ := parseLogRecordKey(logRecord.Key)
 			//查询当前key在原db中的位置
 			logRecordPos, _ := db.indexer.Get(realKey)
-			// //LRU-coldKey------------------------------------------
-			// if logRecordPos == nil {
-			// 	//若indexer中key不存在走coldKeyHintFile
-			// 	//计算key的hash值
-			// 	hashKey := utils.HashKey32Range(realKey, 32)
-			// 	coldKeydf, _ := db.coldKeyHintFile[hashKey]
-			// 	var offset int64 = 0
-			// 	for {
-			// 		logRecord, size, err := coldKeydf.ReadLogRecord(offset)
-			// 		//fmt.Printf("size:%d", size)
-			// 		if err != nil {
-			// 			if err == io.EOF {
-			// 				break
-			// 			}
-			// 			return err
-			// 		}
-			// 		if bytes.Equal(logRecord.Key, realKey) {
-			// 			logRecordPos = data.DecodeLogReordPos(logRecord.Value)
-			// 			break
-			// 		}
-			// 		offset += size
-			// 	}
-			// } // 根据文件 id 找到对应的数据文件
-			// //NOTE:Merge_sync操作只是生成merge后的文件，不需要再更新LRU以及indexer因为merge操作逻辑上并非反映键的使用频率
-			// // evictedKey, _ := db.lru.Put(realKey)
-			// // if evictedKey != nil {
-			// // 	fmt.Printf("evictedKey:%s\n", string(evictedKey))
-			// // 	hashKey := utils.HashKey32Range(evictedKey, 32)
-			// // 	coldKeyHintFile, exists := db.coldKeyHintFile[hashKey]
-			// // 	if !exists {
-			// // 		// 不存在则创建
-			// // 		var err error
-			// // 		coldKeyHintFile, err = data.OpenColdKeyHintFile(
-			// // 			db.options.DirPath,
-			// // 			hashKey,
-			// // 			fio.StandardIO,
-			// // 		)
-			// // 		if err != nil {
-			// // 			return err
-			// // 		}
-			// // 		db.coldKeyHintFile[hashKey] = coldKeyHintFile
-			// // 	}
-			// // 	evictedPos, _ := db.indexer.Get(evictedKey)
-			// // 	coldKeyHintFile.WriteHintRecord(evictedKey, evictedPos)
-			// // 	//删除indexer中被淘汰的key
-			// // 	db.indexer.Delete(evictedKey)
-			// // }
-			// //-----------------------------------------------------
+			//内存索引中没有就去BplusTree的磁盘索引中找
+			if logRecordPos == nil {
+				logRecordPos, _ = db.coldKeyIndexer.Get(realKey)
+				if logRecord != nil {
+					fmt.Printf("realKey:%s\n", string(realKey))
+				}
+			}
 			if logRecordPos != nil && logRecordPos.Fid == file.Fid && logRecordPos.Offset == offset {
 				//清除事务标记，能持久化到磁盘中的数据肯定已经是一个完整的事务
 				logRecord.Key = logRecordKeyWithSeq(nonTransaction, realKey)
@@ -202,6 +163,8 @@ func (db *DB) Merge_Sync() error {
 		//写标识完成的文件
 		// 写标识 merge 完成的文件
 		//每merge完一个文件就保存一个hintfile同时在mergeSyncFinFile中记录已经merge完成的文件
+		mergeDB.Sync()
+		hintFileSync.Sync()
 		mergeSyncFinRecord := &data.LogRecord{
 			Key:   []byte(mergeSyncFinishedKey),
 			Value: []byte(strconv.Itoa(int(file.Fid + 1))),
@@ -305,8 +268,11 @@ func (db *DB) getNonMergeSyncFileId(dirPath string) (uint32, error) {
 	return uint32(nonMergeFileId), nil
 }
 func (db *DB) switchIndexAfterMerge(nonMergedSyncFileId uint32) error {
+	//fmt.Printf("start switchIndexAfterMerge")
 	//构建新索引
 	newIndexer := index.NewIndexer(db.options.IndexType, db.options.DirPath, db.options.SyncWrites, db.options.keyNumThreshhod)
+	newColdKeyIndexer := index.NewBPlusTree(db.options.DirPath, db.options.SyncWrites, db.curColdIndexFileNum+1)
+	newLRU := lru.NewLRU(int(db.options.keyNumThreshhod))
 	//构建新的数据文件集合
 	tmpOlderDataFiles := make(map[uint32]*data.DataFile)
 	//设置文件IO类型
@@ -324,11 +290,20 @@ func (db *DB) switchIndexAfterMerge(nonMergedSyncFileId uint32) error {
 			//在加载索引时会先将k1指向v1的位置，然后再将k1从内存索引中删除，最后再将k1指向v2的位置
 			//这样就保证了内存索引中的数据是最新的
 			oldPos, _ = newIndexer.Delete(key)
+			newLRU.Delete(key)
+			newColdKeyIndexer.Delete(key)
 			//对于删除的数据来说删除的数据本身也是需要被删除的
 			//db.reclaimableSize += int64(logRecordPos.Size)
 			//db.reclaimableSize += int64(oldPos.Size)
 		} else if Type == data.LogRecordTypeNormal {
 			oldPos, _ = newIndexer.Put(key, logRecordPos)
+			evictedKey, _ := newLRU.Put(key)
+			if evictedKey != nil {
+				evictedPos, _ := newIndexer.Get(evictedKey)
+				newColdKeyIndexer.Put(evictedKey, evictedPos)
+				newColdKeyIndexer.Delete(key)
+				newIndexer.Delete(evictedKey)
+			}
 		}
 		if oldPos != nil {
 			//db.reclaimableSize += int64(oldPos.Size)
@@ -380,6 +355,9 @@ func (db *DB) switchIndexAfterMerge(nonMergedSyncFileId uint32) error {
 		var offset int64 = 0
 		for {
 			logRecord, size, err := hintFile.ReadLogRecord(offset)
+			// if string(logRecord.Key) == "bitcask-go-key-000000101" {
+			// 	fmt.Printf("logRecordKey:%s\n", string(logRecord.Key))
+			// }
 			if err != nil {
 				if err == io.EOF {
 					break
@@ -388,6 +366,13 @@ func (db *DB) switchIndexAfterMerge(nonMergedSyncFileId uint32) error {
 			}
 			logReordPos := data.DecodeLogReordPos(logRecord.Value)
 			newIndexer.Put(logRecord.Key, logReordPos)
+			evictedKey, _ := newLRU.Put(logRecord.Key)
+			if evictedKey != nil {
+				evictedPos, _ := newIndexer.Get(evictedKey)
+				newColdKeyIndexer.Put(evictedKey, evictedPos)
+				newColdKeyIndexer.Delete(logRecord.Key)
+				newIndexer.Delete(evictedKey)
+			}
 			offset += size
 		}
 		tmpOlderDataFiles[uint32(fid)] = mergeDataFile
@@ -448,7 +433,11 @@ func (db *DB) switchIndexAfterMerge(nonMergedSyncFileId uint32) error {
 	// 原子切换索引
 	db.mu.Lock()
 	oldIndexer := db.indexer
+	oldLRU := db.lru
+	oldColdKeyIndexer := db.coldKeyIndexer
 	db.indexer = newIndexer
+	db.coldKeyIndexer = newColdKeyIndexer
+	db.lru = newLRU
 	//将dirpath/mergefolder中的文件移动到dirpath中
 	//	先删除旧的数据文件
 	//fmt.Printf("noMergedFileId:%d", nonMergeFileId)
@@ -475,7 +464,11 @@ func (db *DB) switchIndexAfterMerge(nonMergedSyncFileId uint32) error {
 
 	// 关闭旧索引
 	oldIndexer.Close()
+	oldLRU.Clear()
+	oldColdKeyIndexer.Close()
 	os.RemoveAll(filepath.Join(db.options.DirPath, mergeTmpFolder))
+	os.Remove(filepath.Join(db.options.DirPath, indexFileName, strconv.Itoa(int(db.curColdIndexFileNum))))
+	db.curColdIndexFileNum += 1
 
 	// 解除写屏障
 
